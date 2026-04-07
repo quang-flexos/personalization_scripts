@@ -10,7 +10,10 @@
 // Use var here so Apps Script is less likely to fail at load time if this file
 // is accidentally duplicated during a manual paste/update.
 var PERSONALIZED_DOC_CFG = Object.freeze({
-  TEMPLATE_DOC_ID: '1Iku5BhwWC3KXMsn7HitAmzQBDBoUAoC7nvfnTKvUuA0',
+  DEFAULT_TEMPLATE_DOC_ID: '1Iku5BhwWC3KXMsn7HitAmzQBDBoUAoC7nvfnTKvUuA0',
+  TEMPLATE_DOC_IDS_BY_SHEET: Object.freeze({
+    'Catawiki SLT': '1HgYNoMBvFhPi5ix2QZILLIH-OFJcFWMcw4mnBK1esvI',
+  }),
   PARENT_FOLDER_ID: '1iBAZAAw8Q6AmDS_MU-y3-v2vRC_IHhu3',
   DOC_URL_HEADER: 'DOC_URL',
   PDF_URL_HEADER: 'PDF_URL',
@@ -180,7 +183,7 @@ function pdBuildRunErrorMessage_(error) {
     '1. Save the Apps Script project so the Drive scope in appsscript.json is active.',
     '2. Run the menu action again and accept the Google authorization prompt if Google shows one.',
     '3. If the prompt never appears, revoke the project access and authorize it again.',
-    '4. Confirm TEMPLATE_DOC_ID and PARENT_FOLDER_ID point to items this script can open.',
+    '4. Confirm the resolved template doc ID and PARENT_FOLDER_ID point to items this script can open.',
   ].join('\n');
 }
 
@@ -329,17 +332,30 @@ function pdLoadRunContext_(sheet, includeTemplate) {
     return context;
   }
 
-  const templateDoc = DocumentApp.openById(PERSONALIZED_DOC_CFG.TEMPLATE_DOC_ID);
+  const templateDocId = pdGetTemplateDocIdForSheet_(sheet);
+  const templateDoc = DocumentApp.openById(templateDocId);
   const templateBody = pdGetDocumentBody_(templateDoc);
   const placeholders = pdExtractPlaceholders_(templateBody.getText());
   const missingHeaders = pdFindMissingTemplateHeaders_(headers, placeholders);
 
+  context.templateDocId = templateDocId;
   context.templateDoc = templateDoc;
   context.templatePlaceholders = placeholders;
   context.templateMissingHeaders = missingHeaders;
   context.templateFileName = DriveApp.getFileById(templateDoc.getId()).getName();
 
   return context;
+}
+
+function pdGetTemplateDocIdForSheet_(sheet) {
+  const sheetName = String(sheet?.getName() || '').trim();
+  const overrideDocId = PERSONALIZED_DOC_CFG.TEMPLATE_DOC_IDS_BY_SHEET[sheetName];
+
+  if (overrideDocId) {
+    return overrideDocId;
+  }
+
+  return PERSONALIZED_DOC_CFG.DEFAULT_TEMPLATE_DOC_ID;
 }
 
 function pdEvaluateRowReadiness_(context, row) {
