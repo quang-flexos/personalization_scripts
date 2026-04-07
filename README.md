@@ -3,7 +3,7 @@
 This repo is the local drafting area for the AILA personalization workflow.
 
 The live system runs from Google Sheets, Google Docs, Google Drive, Apps Script, and Kit.
-This repo exists so we can keep the source code in `.js`, review it locally, and then paste it into the live Apps Script project.
+This repo exists so we can keep the source code in `.js`, review it locally, and then deploy it into the live Apps Script project with `@google/clasp`.
 
 ## What Lives Where
 
@@ -41,7 +41,7 @@ Use [app_scripts/personalized_docs.js](/Users/quang/Desktop/DEV/personalization_
 - edit the live Google Sheet for learner data and generated values
 - edit the live Google Docs for prompt-guide content
 - keep local source files in `.js`
-- paste local `.js` code into the live Apps Script project when updating the automation
+- push local `.js` code into the live Apps Script project with `clasp`
 
 **Do not**
 
@@ -222,6 +222,27 @@ Set these in the live Apps Script project:
 
 - `ENRICHMENT_SHEET_NAME`
 
+## Bun + clasp Setup
+
+1. Run `bun install`.
+2. Run `bunx clasp login`.
+3. Copy `.clasp.json.example` to `.clasp.json`.
+4. Add your live Apps Script `scriptId` to `.clasp.json`.
+5. Copy `.clasp-deploy.json.example` to `.clasp-deploy.json`.
+6. Add your current web app `deploymentId` to `.clasp-deploy.json` if you already have a stable deployment URL.
+
+Use these commands for the local Apps Script workflow:
+
+- `bun run clasp:status`: show which files under `app_scripts/` will be pushed
+- `bun run clasp:pull`: pull the current remote project into `app_scripts/`
+- `bun run clasp:push`: push the local `app_scripts/` source into Apps Script
+- `bun run clasp:open`: open the Apps Script project in the browser
+- `bun run clasp:deploy`: push local code, create a new version, and redeploy the saved `deploymentId`
+- `bun run clasp:deploy:new`: push local code and create a brand new deployment
+
+Use `bun run clasp:deploy:new` the first time you need a web app deployment or when you intentionally want a new deployment URL.
+After that first deploy, save the returned deployment ID into `.clasp-deploy.json` so `bun run clasp:deploy` keeps the same web app URL.
+
 ## How Row 2 Templates Should Be Written
 
 Write the template directly into row `2` under the matching `COURSE_*` header.
@@ -290,16 +311,17 @@ Never guess missing metadata.
 
 1. Confirm the live sheet has the final Day 1 to Day 10 headers.
 2. Confirm row `2` contains the final course instructions.
-3. Paste the latest local `.js` files into the live Apps Script project.
-4. Run `Preflight all rows` from `Personalized Docs`.
-5. Review blocked learners.
-6. Fix missing data or missing generated content.
-7. Run content generation for missing `COURSE_*` values.
-8. Run `Build docs + PDFs for all rows`.
-9. Spot-check several learner docs and PDFs.
-10. Run `Sync PDF links to Kit for all rows`.
-11. Confirm the PDF URL is present in the Kit field `PDF_URL`.
-12. Proceed with email send.
+3. Run `bun run clasp:push` to sync the latest local Apps Script files.
+4. If the deployed web app behavior changed, run `bun run clasp:deploy` to refresh the stable web app deployment.
+5. Run `Preflight all rows` from `Personalized Docs`.
+6. Review blocked learners.
+7. Fix missing data or missing generated content.
+8. Run content generation for missing `COURSE_*` values.
+9. Run `Build docs + PDFs for all rows`.
+10. Spot-check several learner docs and PDFs.
+11. Run `Sync PDF links to Kit for all rows`.
+12. Confirm the PDF URL is present in the Kit field `PDF_URL`.
+13. Proceed with email send.
 
 Delivery scope is `complete only`.
 
@@ -331,16 +353,17 @@ That means a learner is delivered only when all of these are true:
 - sync PDF links to Kit
 - run the full phased delivery flow
 
-## What To Paste Into Apps Script
+## What clasp Pushes To Apps Script
 
-Paste these local files into the live Apps Script project:
+`clasp` pushes the files inside `app_scripts/` into the live Apps Script project:
 
+- [app_scripts/appsscript.json](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/appsscript.json)
 - [app_scripts/openai.js](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/openai.js)
 - [app_scripts/personalized_docs.js](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/personalized_docs.js)
 - [app_scripts/kit.js](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/kit.js)
-- [app_scripts/s3.js](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/s3.js) only if the webhook logic changed
+- [app_scripts/s3.js](/Users/quang/Desktop/DEV/personalization_scripts/app_scripts/s3.js)
 
-Keep the local source in `.js`. Apps Script can still store the files as `.gs` in the editor if needed.
+Keep the local source in `.js`. `clasp` will sync that source into Apps Script.
 
 ## Current Limits
 

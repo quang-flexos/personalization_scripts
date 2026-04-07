@@ -1,0 +1,15 @@
+{
+  "name": "personalization-scripts",
+  "private": true,
+  "scripts": {
+    "clasp:status": "clasp show-file-status",
+    "clasp:pull": "clasp pull",
+    "clasp:push": "clasp push",
+    "clasp:open": "clasp open-script",
+    "clasp:deploy": "bun scripts/clasp-deploy.mjs",
+    "clasp:deploy:new": "bun scripts/clasp-deploy.mjs --new"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.3.0"
+  }
+}
