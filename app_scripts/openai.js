@@ -26,6 +26,8 @@ const OPENAI_CFG = {
   USAGE_SHEET_NAME: '_OPENAI_USAGE',
   BATCH_ITEMS_SHEET_NAME: '_OPENAI_BATCH_ITEMS',
   LATEST_BATCH_ID_PROPERTY: 'OPENAI_LATEST_BATCH_ID',
+  INTAKE_PIPELINE_STATE_PROPERTY: 'OPENAI_INTAKE_PIPELINE_STATE',
+  INTAKE_PIPELINE_TRIGGER_FUNCTION: 'continueIntakeBatchPipeline',
 };
 
 // =========================
@@ -416,6 +418,48 @@ function createIntakeBlueprintBatchAllMissing() {
   ui.alert(formatOpenAIBatchCreateMessage_(result));
 }
 
+function continueIntakeBatchPipeline() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+
+  try {
+    const state = getIntakePipelineState_();
+    if (!state?.batchId) {
+      cleanupIntakePipeline_();
+      return;
+    }
+
+    const batch = retrieveOpenAIBatch_(state.batchId);
+    if (batch.status !== 'completed') {
+      if (isTerminalFailedBatchStatus_(batch.status)) {
+        cleanupIntakePipeline_();
+        throw new Error(`OpenAI intake pipeline batch ${state.batchId} ended with status ${batch.status}`);
+      }
+      return;
+    }
+
+    const spreadsheet = SpreadsheetApp.openById(state.spreadsheetId);
+    const sh = getSheetByStoredId_(spreadsheet, state.sheetId, state.sheetName);
+    if (!sh) {
+      cleanupIntakePipeline_();
+      throw new Error('Intake pipeline sheet no longer exists');
+    }
+
+    const importResult = importOpenAIBatchResults_(sh, state.batchId);
+    const pipelineResult = runPostBlueprintIntakePipeline_(sh, state.rows || []);
+    cleanupIntakePipeline_();
+
+    Logger.log(JSON.stringify({
+      message: 'OpenAI intake pipeline completed',
+      batchId: state.batchId,
+      importResult,
+      pipelineResult,
+    }));
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function runOpenAIGenerator_(sh, headers, data, rows, cols) {
   const bpCol = headers.findIndex(h => String(h).toUpperCase() === INTAKE_OUTPUT_HEADERS.BLUEPRINT);
   if (bpCol === -1) throw new Error('Missing BLUEPRINT header');
@@ -637,8 +681,12 @@ function buildIntakeBlueprintBatchCustomId_(rowNumber, colNumber, cacheKey) {
   return `intake_blueprint:r${rowNumber}:c${colNumber}:k${cacheKey.slice(-16)}`;
 }
 
+function buildIntakeFieldsBatchCustomId_(rowNumber, colNumber, cacheKey) {
+  return `intake_fields:r${rowNumber}:c${colNumber}:k${cacheKey.slice(-16)}`;
+}
+
 function parseOpenAIBatchCustomId_(customId) {
-  const match = String(customId || '').match(/^(course|intake_blueprint):r(\d+):c(\d+):k(.+)$/);
+  const match = String(customId || '').match(/^(course|intake_blueprint|intake_fields):r(\d+):c(\d+):k(.+)$/);
   if (!match) return null;
 
   return {
@@ -682,12 +730,6 @@ function importOpenAIBatchResults_(sh, batchId) {
       continue;
     }
 
-    const current = String(sh.getRange(target.rowNumber, target.colNumber).getValue() || '').trim();
-    if (current) {
-      skipped++;
-      continue;
-    }
-
     const output = extractText_(responseBody);
     if (!output) {
       sh.getRange(target.rowNumber, target.colNumber).setValue('ERROR: Empty OpenAI batch output');
@@ -696,9 +738,30 @@ function importOpenAIBatchResults_(sh, batchId) {
     }
 
     const task = target.task;
-    const model = task === 'intake_blueprint' ? INTAKE_CFG.BLUEPRINT_MODEL : OPENAI_CFG.COURSE_MODEL_LABEL;
-    const value = task === 'intake_blueprint' ? normalizeBatchBlueprintOutput_(output) : output;
+    const model = getOpenAIBatchTaskModel_(task);
     const cacheKey = batchItemMap[item.custom_id]?.cacheKey || `${task}:${target.cacheKeyTail}`;
+
+    if (task === 'intake_fields') {
+      const fields = parseBatchIntakeFieldsOutput_(output);
+      const writeCount = writeBatchIntakeFields_(sh, target.rowNumber, fields);
+      saveOpenAICacheValue_(cacheKey, task, model, JSON.stringify(fields), responseBody?.id);
+      cache[cacheKey] = { value: JSON.stringify(fields) };
+      appendOpenAIUsage_(`${task}_batch`, model, cacheKey, 'ok', responseBody);
+      if (writeCount) {
+        writes += writeCount;
+      } else {
+        skipped++;
+      }
+      continue;
+    }
+
+    const current = String(sh.getRange(target.rowNumber, target.colNumber).getValue() || '').trim();
+    if (current) {
+      skipped++;
+      continue;
+    }
+
+    const value = task === 'intake_blueprint' ? normalizeBatchBlueprintOutput_(output) : output;
     sh.getRange(target.rowNumber, target.colNumber).setValue(value);
     saveOpenAICacheValue_(cacheKey, task, model, value, responseBody?.id);
     cache[cacheKey] = { value };
@@ -792,6 +855,9 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
   const headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(normalizeHeader_);
   const tCol = headers.findIndex(h => String(h).toUpperCase() === 'TRANSCRIPT');
   const bpCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.BLUEPRINT);
+  const roleCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.ROLE);
+  const companyCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COMPANY);
+  const industryCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
 
   if (tCol === -1) throw new Error('Missing TRANSCRIPT header');
 
@@ -802,6 +868,9 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
 
   const transcripts = sh.getRange(3, tCol + 1, rowCount, 1).getValues();
   const blueprints = sh.getRange(3, bpCol + 1, rowCount, 1).getValues();
+  const roles = sh.getRange(3, roleCol + 1, rowCount, 1).getValues();
+  const companies = sh.getRange(3, companyCol + 1, rowCount, 1).getValues();
+  const industries = sh.getRange(3, industryCol + 1, rowCount, 1).getValues();
   const cache = loadOpenAICacheMap_();
   const requests = [];
   let cacheWrites = 0;
@@ -816,26 +885,49 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
     }
 
     const existingBlueprint = String(blueprints[offset]?.[0] || '').trim();
-    if (existingBlueprint) {
+    if (!existingBlueprint) {
+      const payload = buildIntakeBlueprintPayload_(transcript);
+      const cacheKey = buildOpenAICacheKey_('intake_blueprint', payload);
+      const cached = cache[cacheKey];
+      if (cached?.value) {
+        sh.getRange(r, bpCol + 1).setValue(normalizeBlueprintValue_(cached.value));
+        cacheWrites++;
+      } else {
+        requests.push({
+          customId: buildIntakeBlueprintBatchCustomId_(r, bpCol + 1, cacheKey),
+          body: payload,
+          rowNumber: r,
+          colNumber: bpCol + 1,
+          cacheKey,
+        });
+      }
+    } else {
+      skipped++;
+    }
+
+    const existingRole = String(roles[offset]?.[0] || '').trim();
+    const existingCompany = String(companies[offset]?.[0] || '').trim();
+    const existingIndustry = String(industries[offset]?.[0] || '').trim();
+    if (existingRole && existingCompany && existingIndustry) {
       skipped++;
       continue;
     }
 
-    const payload = buildIntakeBlueprintPayload_(transcript);
-    const cacheKey = buildOpenAICacheKey_('intake_blueprint', payload);
-    const cached = cache[cacheKey];
-    if (cached?.value) {
-      sh.getRange(r, bpCol + 1).setValue(normalizeBlueprintValue_(cached.value));
-      cacheWrites++;
+    const fieldsPayload = buildIntakeFieldsPayload_(transcript);
+    const fieldsCacheKey = buildOpenAICacheKey_('intake_fields', fieldsPayload);
+    const cachedFields = cache[fieldsCacheKey];
+    if (cachedFields?.value) {
+      const fields = JSON.parse(cachedFields.value);
+      cacheWrites += writeBatchIntakeFields_(sh, r, fields);
       continue;
     }
 
     requests.push({
-      customId: buildIntakeBlueprintBatchCustomId_(r, bpCol + 1, cacheKey),
-      body: payload,
+      customId: buildIntakeFieldsBatchCustomId_(r, roleCol + 1, fieldsCacheKey),
+      body: fieldsPayload,
       rowNumber: r,
-      colNumber: bpCol + 1,
-      cacheKey,
+      colNumber: roleCol + 1,
+      cacheKey: fieldsCacheKey,
     });
   }
 
@@ -881,6 +973,50 @@ function normalizeBatchBlueprintOutput_(output) {
   return normalizeBlueprintValue_(raw);
 }
 
+function parseBatchIntakeFieldsOutput_(output) {
+  const raw = String(output || '').trim();
+  if (!raw) return { role: '', company: '', industry: '' };
+
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('Structured fields JSON.parse failed: ' + e.message + ' | raw=' + raw.slice(0, 200));
+  }
+
+  if (!obj || typeof obj !== 'object') {
+    throw new Error('Structured fields output missing object');
+  }
+
+  return {
+    role: normalizeExtractedFieldValue_(obj.role),
+    company: normalizeExtractedFieldValue_(obj.company),
+    industry: normalizeIndustryValue_(obj.industry),
+  };
+}
+
+function writeBatchIntakeFields_(sh, rowNumber, fields) {
+  const lastCol = sh.getLastColumn();
+  const headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(normalizeHeader_);
+  const roleCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.ROLE);
+  const companyCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COMPANY);
+  const industryCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+  const row = sh.getRange(rowNumber, 1, 1, sh.getLastColumn()).getValues()[0];
+  let writes = 0;
+
+  writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, roleCol, normalizeExtractedFieldValue_(fields.role));
+  writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, companyCol, normalizeExtractedFieldValue_(fields.company));
+  writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, industryCol, normalizeIndustryValue_(fields.industry));
+
+  return writes;
+}
+
+function getOpenAIBatchTaskModel_(task) {
+  if (task === 'intake_blueprint') return INTAKE_CFG.BLUEPRINT_MODEL;
+  if (task === 'intake_fields') return INTAKE_CFG.FIELDS_MODEL;
+  return OPENAI_CFG.COURSE_MODEL_LABEL;
+}
+
 // =========================
 // INTAKE
 // =========================
@@ -892,14 +1028,13 @@ function generateIntakeSelectedRows() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
   const rows = getSelectedRowsFromRanges_(ranges, lastRow, 3);
+  if (!rows.length) return ui.alert('Select at least one data row (row 3+).');
 
-  const result = runIntakeCombined_(sh, data, rows);
-  ui.alert(`Done. Wrote: ${result.writes}, Skipped: ${result.skipped}, Errors: ${result.errors}`);
+  const result = startIntakeBatchPipeline_(sh, rows, 'selected');
+  ui.alert(formatIntakePipelineStartMessage_(result));
 }
 
 function generateIntakeAllMissing() {
@@ -907,15 +1042,152 @@ function generateIntakeAllMissing() {
   const sh = getSheet_();
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
   const rows = [];
   for (let r = 3; r <= lastRow; r++) rows.push(r);
 
-  const result = runIntakeCombined_(sh, data, rows);
-  ui.alert(`Done. Wrote: ${result.writes}, Skipped: ${result.skipped}, Errors: ${result.errors}`);
+  const result = startIntakeBatchPipeline_(sh, rows, 'all_missing');
+  ui.alert(formatIntakePipelineStartMessage_(result));
+}
+
+function startIntakeBatchPipeline_(sh, rows, mode) {
+  const result = createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows);
+  if (!result.batch) {
+    const pipelineResult = runPostBlueprintIntakePipeline_(sh, rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN));
+    return {
+      started: false,
+      mode,
+      batchResult: result,
+      pipelineResult,
+    };
+  }
+
+  const state = buildIntakePipelineState_(sh, rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN), result.batch.id, mode);
+  saveIntakePipelineState_(state);
+  scheduleIntakePipelineTrigger_();
+
+  return {
+    started: true,
+    mode,
+    batchResult: result,
+    pipelineResult: null,
+  };
+}
+
+function formatIntakePipelineStartMessage_(result) {
+  const batchResult = result.batchResult || {};
+  if (!result.started) {
+    const post = result.pipelineResult || {};
+    return [
+      'No OpenAI batch was needed.',
+      `Cache writes: ${batchResult.cacheWrites || 0}`,
+      `Skipped: ${batchResult.skipped || 0}`,
+      `Backfill writes: ${post.backfill?.writes || 0}`,
+      `Industry normalization writes: ${post.normalize?.writes || 0}`,
+    ].join('\n');
+  }
+
+  return [
+    `Intake pipeline started: ${batchResult.batch.id}`,
+    `Queued OpenAI requests: ${batchResult.queued}`,
+    `Skipped: ${batchResult.skipped}`,
+    '',
+    'You can close the sheet. A trigger will check the batch and then import BLUEPRINT, ROLE, COMPANY, INDUSTRY, backfill remaining blanks, and normalize INDUSTRY.',
+  ].join('\n');
+}
+
+function buildIntakePipelineState_(sh, rows, batchId, mode) {
+  return {
+    spreadsheetId: sh.getParent().getId(),
+    sheetId: sh.getSheetId(),
+    sheetName: sh.getName(),
+    rows,
+    batchId,
+    mode,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function saveIntakePipelineState_(state) {
+  PropertiesService.getScriptProperties().setProperty(
+    OPENAI_CFG.INTAKE_PIPELINE_STATE_PROPERTY,
+    JSON.stringify(state),
+  );
+}
+
+function getIntakePipelineState_() {
+  const raw = String(
+    PropertiesService.getScriptProperties().getProperty(
+      OPENAI_CFG.INTAKE_PIPELINE_STATE_PROPERTY,
+    ) || '',
+  ).trim();
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+function scheduleIntakePipelineTrigger_() {
+  removeIntakePipelineTriggers_();
+  ScriptApp.newTrigger(OPENAI_CFG.INTAKE_PIPELINE_TRIGGER_FUNCTION)
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+}
+
+function cleanupIntakePipeline_() {
+  PropertiesService.getScriptProperties().deleteProperty(OPENAI_CFG.INTAKE_PIPELINE_STATE_PROPERTY);
+  removeIntakePipelineTriggers_();
+}
+
+function removeIntakePipelineTriggers_() {
+  for (const trigger of ScriptApp.getProjectTriggers()) {
+    if (trigger.getHandlerFunction() === OPENAI_CFG.INTAKE_PIPELINE_TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+}
+
+function isTerminalFailedBatchStatus_(status) {
+  return ['failed', 'expired', 'cancelled'].includes(String(status || ''));
+}
+
+function getSheetByStoredId_(spreadsheet, sheetId, sheetName) {
+  const numericSheetId = Number(sheetId);
+  for (const sheet of spreadsheet.getSheets()) {
+    if (sheet.getSheetId() === numericSheetId) return sheet;
+  }
+
+  return sheetName ? spreadsheet.getSheetByName(sheetName) : null;
+}
+
+function runPostBlueprintIntakePipeline_(sh, rows) {
+  const safeRows = rows && rows.length ? rows : [];
+  const data = loadSheetDataForRows_(sh, safeRows);
+  const backfill = runEnrichmentBackfill_(sh, data, safeRows);
+  const normalize = runIndustryNormalizationIfPossible_(sh, data, safeRows);
+
+  return { backfill, normalize };
+}
+
+function loadSheetDataForRows_(sh, rows) {
+  const lastCol = sh.getLastColumn();
+  const data = [];
+  data[0] = sh.getRange(1, 1, 1, lastCol).getValues()[0];
+
+  for (const rowNumber of rows) {
+    data[rowNumber - 1] = sh.getRange(rowNumber, 1, 1, lastCol).getValues()[0];
+  }
+
+  return data;
+}
+
+function runIndustryNormalizationIfPossible_(sh, data, rows) {
+  const headers = data[0].map(normalizeHeader_);
+  if (findColumn_(headers, INTAKE_OUTPUT_HEADERS.INDUSTRY) === -1) {
+    return { writes: 0, skipped: rows.length, errors: 0 };
+  }
+
+  return runIndustryNormalization_(sh, data, rows);
 }
 
 function generateIntakeBlueprintSelectedRows() {
