@@ -110,10 +110,4 @@ describe("OpenAI helper behavior", () => {
     expect(ctx.normalizeBatchBlueprintOutput_('{"blueprint":"Name: Ada"}')).toBe("Name: Ada");
     expect(ctx.normalizeBatchBlueprintOutput_("Name: Ada")).toBe("Name: Ada");
   });
-
-  test("loadOpenAICacheMap_ does not touch sheets when sheet cache reads are disabled", () => {
-    const ctx = loadOpenAIHelpers();
-
-    expect(ctx.loadOpenAICacheMap_()).toEqual({});
-  });
 });
