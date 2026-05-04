@@ -20,6 +20,8 @@ const OPENAI_CFG = {
   COURSE_MODEL_LABEL: `prompt:${OPENAI_PROMPT_ID}`,
   PROMPT_CACHE_KEY: 'personalized-course-v1',
   PROMPT_CACHE_RETENTION: 'in_memory',
+  USE_SHEET_CACHE_READS: false,
+  USE_BATCH_ITEM_MAP_READS: false,
   CACHE_SHEET_NAME: '_OPENAI_CACHE',
   USAGE_SHEET_NAME: '_OPENAI_USAGE',
   BATCH_ITEMS_SHEET_NAME: '_OPENAI_BATCH_ITEMS',
@@ -274,7 +276,6 @@ function openaiGenerateSelectedRowsSelectedCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
@@ -298,7 +299,6 @@ function openaiGenerateSelectedRowsAllCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
@@ -322,7 +322,6 @@ function openaiCreateBatchSelectedRowsSelectedCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
@@ -395,13 +394,11 @@ function createIntakeBlueprintBatchSelectedRows() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
   const rows = getSelectedRowsFromRanges_(ranges, lastRow, 3);
 
-  const result = createOpenAIIntakeBlueprintBatch_(sh, data, rows);
+  const result = createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows);
   ui.alert(formatOpenAIBatchCreateMessage_(result));
 }
 
@@ -410,14 +407,12 @@ function createIntakeBlueprintBatchAllMissing() {
   const sh = getSheet_();
 
   const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
   const rows = [];
   for (let r = 3; r <= lastRow; r++) rows.push(r);
 
-  const result = createOpenAIIntakeBlueprintBatch_(sh, data, rows);
+  const result = createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows);
   ui.alert(formatOpenAIBatchCreateMessage_(result));
 }
 
@@ -751,6 +746,87 @@ function createOpenAIIntakeBlueprintBatch_(sh, data, rows) {
       } else {
         skipped++;
       }
+      continue;
+    }
+
+    requests.push({
+      customId: buildIntakeBlueprintBatchCustomId_(r, bpCol + 1, cacheKey),
+      body: payload,
+      rowNumber: r,
+      colNumber: bpCol + 1,
+      cacheKey,
+    });
+  }
+
+  if (!requests.length) {
+    return {
+      batch: null,
+      queued: 0,
+      directWrites: 0,
+      cacheWrites,
+      skipped,
+    };
+  }
+
+  const content = buildOpenAIBatchFileContent_(requests);
+  const inputFile = uploadOpenAIBatchInputFile_(content);
+  const batch = createOpenAIBatch_(inputFile.id, {
+    task: 'intake_blueprint',
+    request_count: String(requests.length),
+  });
+  saveOpenAIBatchItemMappings_(batch.id, requests);
+  setLatestOpenAIBatchId_(batch.id);
+
+  return {
+    batch,
+    queued: requests.length,
+    directWrites: 0,
+    cacheWrites,
+    skipped,
+  };
+}
+
+function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
+  const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
+  const headers = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(normalizeHeader_);
+  const tCol = headers.findIndex(h => String(h).toUpperCase() === 'TRANSCRIPT');
+  const bpCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.BLUEPRINT);
+
+  if (tCol === -1) throw new Error('Missing TRANSCRIPT header');
+
+  const rowCount = Math.max(0, lastRow - 2);
+  if (!rowCount) {
+    return { batch: null, queued: 0, directWrites: 0, cacheWrites: 0, skipped: 0 };
+  }
+
+  const transcripts = sh.getRange(3, tCol + 1, rowCount, 1).getValues();
+  const blueprints = sh.getRange(3, bpCol + 1, rowCount, 1).getValues();
+  const cache = loadOpenAICacheMap_();
+  const requests = [];
+  let cacheWrites = 0;
+  let skipped = 0;
+
+  for (const r of rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN)) {
+    const offset = r - 3;
+    const transcript = String(transcripts[offset]?.[0] || '').trim();
+    if (!transcript) {
+      skipped++;
+      continue;
+    }
+
+    const existingBlueprint = String(blueprints[offset]?.[0] || '').trim();
+    if (existingBlueprint) {
+      skipped++;
+      continue;
+    }
+
+    const payload = buildIntakeBlueprintPayload_(transcript);
+    const cacheKey = buildOpenAICacheKey_('intake_blueprint', payload);
+    const cached = cache[cacheKey];
+    if (cached?.value) {
+      sh.getRange(r, bpCol + 1).setValue(normalizeBlueprintValue_(cached.value));
+      cacheWrites++;
       continue;
     }
 
@@ -1829,6 +1905,8 @@ function getLatestOpenAIBatchId_() {
 }
 
 function loadOpenAICacheMap_() {
+  if (!OPENAI_CFG.USE_SHEET_CACHE_READS) return {};
+
   const sheet = getOpenAICacheSheet_(false);
   if (!sheet) return {};
 
@@ -1855,26 +1933,7 @@ function saveOpenAICacheValue_(key, task, model, value, responseId) {
   if (!key || !cleanValue) return;
 
   const sheet = getOpenAICacheSheet_(true);
-  const now = new Date();
-  const lastRow = sheet.getLastRow();
-  if (lastRow > 1) {
-    const keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    for (let i = 0; i < keys.length; i++) {
-      if (String(keys[i][0] || '') === key) {
-        sheet.getRange(i + 2, 1, 1, 6).setValues([[
-          key,
-          task,
-          model,
-          cleanValue,
-          responseId || '',
-          now,
-        ]]);
-        return;
-      }
-    }
-  }
-
-  sheet.appendRow([key, task, model, cleanValue, responseId || '', now]);
+  sheet.appendRow([key, task, model, cleanValue, responseId || '', new Date()]);
 }
 
 function appendOpenAIUsage_(task, model, cacheKey, status, resp) {
@@ -1955,6 +2014,8 @@ function saveOpenAIBatchItemMappings_(batchId, requests) {
 }
 
 function loadOpenAIBatchItemMap_(batchId) {
+  if (!OPENAI_CFG.USE_BATCH_ITEM_MAP_READS) return {};
+
   const sheet = getOpenAIBatchItemsSheet_(false);
   if (!sheet) return {};
 

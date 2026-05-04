@@ -342,6 +342,7 @@ That means a learner is delivered only when all of these are true:
 - create an async OpenAI Batch API job for selected missing `COURSE_*` content
 - check and import the latest OpenAI Batch API job results
 - hidden `_OPENAI_CACHE`, `_OPENAI_USAGE`, and `_OPENAI_BATCH_ITEMS` sheets are created automatically when needed
+- hidden OpenAI sheets are append-only by default to avoid spreadsheet timeout errors on large documents
 
 **Intake**
 
