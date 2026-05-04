@@ -122,17 +122,6 @@ function buildSpreadsheetMenus_() {
       .addItem("Generate BLUEPRINT (ALL missing)", "generateIntakeAllMissing")
       .addSeparator()
       .addItem(
-        "Create BLUEPRINT Batch (selected rows)",
-        "createIntakeBlueprintBatchSelectedRows",
-      )
-      .addItem(
-        "Create BLUEPRINT Batch (ALL missing)",
-        "createIntakeBlueprintBatchAllMissing",
-      )
-      .addItem("Check latest batch", "openaiCheckLatestBatch")
-      .addItem("Import latest batch results", "openaiImportLatestBatchResults")
-      .addSeparator()
-      .addItem(
         "Backfill ROLE/COMPANY/INDUSTRY (selected rows)",
         "backfillIntakeFieldsFromEnrichmentSelectedRows",
       )

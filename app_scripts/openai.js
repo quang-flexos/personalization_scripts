@@ -387,40 +387,6 @@ function openaiImportLatestBatchResults() {
   );
 }
 
-function createIntakeBlueprintBatchSelectedRows() {
-  const ui = SpreadsheetApp.getUi();
-  const sh = getSheet_();
-
-  const ranges = getSelectedRanges_(sh);
-  if (!ranges.length) return ui.alert('No selection.');
-
-  const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
-  if (lastRow < 3) return ui.alert('No data rows.');
-
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  const rows = getSelectedRowsFromRanges_(ranges, lastRow, 3);
-
-  const result = createOpenAIIntakeBlueprintBatch_(sh, data, rows);
-  ui.alert(formatOpenAIBatchCreateMessage_(result));
-}
-
-function createIntakeBlueprintBatchAllMissing() {
-  const ui = SpreadsheetApp.getUi();
-  const sh = getSheet_();
-
-  const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
-  if (lastRow < 3) return ui.alert('No data rows.');
-
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  const rows = [];
-  for (let r = 3; r <= lastRow; r++) rows.push(r);
-
-  const result = createOpenAIIntakeBlueprintBatch_(sh, data, rows);
-  ui.alert(formatOpenAIBatchCreateMessage_(result));
-}
-
 function runOpenAIGenerator_(sh, headers, data, rows, cols) {
   const bpCol = headers.findIndex(h => String(h).toUpperCase() === INTAKE_OUTPUT_HEADERS.BLUEPRINT);
   if (bpCol === -1) throw new Error('Missing BLUEPRINT header');
@@ -638,19 +604,14 @@ function buildCourseBatchCustomId_(rowNumber, colNumber, cacheKey) {
   return `course:r${rowNumber}:c${colNumber}:k${cacheKey.slice(-16)}`;
 }
 
-function buildIntakeBlueprintBatchCustomId_(rowNumber, colNumber, cacheKey) {
-  return `intake_blueprint:r${rowNumber}:c${colNumber}:k${cacheKey.slice(-16)}`;
-}
-
-function parseOpenAIBatchCustomId_(customId) {
-  const match = String(customId || '').match(/^(course|intake_blueprint):r(\d+):c(\d+):k(.+)$/);
+function parseCourseBatchCustomId_(customId) {
+  const match = String(customId || '').match(/^course:r(\d+):c(\d+):k(.+)$/);
   if (!match) return null;
 
   return {
-    task: match[1],
-    rowNumber: Number(match[2]),
-    colNumber: Number(match[3]),
-    cacheKeyTail: match[4],
+    rowNumber: Number(match[1]),
+    colNumber: Number(match[2]),
+    cacheKeyTail: match[3],
   };
 }
 
@@ -672,7 +633,7 @@ function importOpenAIBatchResults_(sh, batchId) {
   const batchItemMap = loadOpenAIBatchItemMap_(batchId);
 
   for (const item of rows) {
-    const target = parseOpenAIBatchCustomId_(item.custom_id);
+    const target = parseCourseBatchCustomId_(item.custom_id);
     if (!target) {
       skipped++;
       continue;
@@ -700,109 +661,15 @@ function importOpenAIBatchResults_(sh, batchId) {
       continue;
     }
 
-    const task = target.task;
-    const model = task === 'intake_blueprint' ? INTAKE_CFG.BLUEPRINT_MODEL : OPENAI_CFG.COURSE_MODEL_LABEL;
-    const value = task === 'intake_blueprint' ? normalizeBatchBlueprintOutput_(output) : output;
-    const cacheKey = batchItemMap[item.custom_id]?.cacheKey || `${task}:${target.cacheKeyTail}`;
-    sh.getRange(target.rowNumber, target.colNumber).setValue(value);
-    saveOpenAICacheValue_(cacheKey, task, model, value, responseBody?.id);
-    cache[cacheKey] = { value };
-    appendOpenAIUsage_(`${task}_batch`, model, cacheKey, 'ok', responseBody);
+    const cacheKey = batchItemMap[item.custom_id]?.cacheKey || `course:${target.cacheKeyTail}`;
+    sh.getRange(target.rowNumber, target.colNumber).setValue(output);
+    saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL_LABEL, output, responseBody?.id);
+    cache[cacheKey] = { value: output };
+    appendOpenAIUsage_('course_batch', OPENAI_CFG.COURSE_MODEL_LABEL, cacheKey, 'ok', responseBody);
     writes++;
   }
 
   return { status: batch.status, writes, skipped, errors };
-}
-
-function createOpenAIIntakeBlueprintBatch_(sh, data, rows) {
-  const headers = data[0].map(normalizeHeader_);
-  const tCol = headers.findIndex(h => String(h).toUpperCase() === 'TRANSCRIPT');
-  const bpCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.BLUEPRINT);
-
-  if (tCol === -1) throw new Error('Missing TRANSCRIPT header');
-
-  const cache = loadOpenAICacheMap_();
-  const requests = [];
-  let cacheWrites = 0;
-  let skipped = 0;
-
-  for (const r of rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN)) {
-    const row = data[r - 1] || [];
-    const transcript = String(row[tCol] || '').trim();
-    if (!transcript) {
-      skipped++;
-      continue;
-    }
-
-    const existingBlueprint = String(row[bpCol] || '').trim();
-    if (existingBlueprint) {
-      skipped++;
-      continue;
-    }
-
-    const payload = buildIntakeBlueprintPayload_(transcript);
-    const cacheKey = buildOpenAICacheKey_('intake_blueprint', payload);
-    const cached = cache[cacheKey];
-    if (cached?.value) {
-      const writeCount = writeIfBlank_(sh, row, r, bpCol, normalizeBlueprintValue_(cached.value));
-      data[r - 1] = row;
-      if (writeCount) {
-        cacheWrites++;
-      } else {
-        skipped++;
-      }
-      continue;
-    }
-
-    requests.push({
-      customId: buildIntakeBlueprintBatchCustomId_(r, bpCol + 1, cacheKey),
-      body: payload,
-      rowNumber: r,
-      colNumber: bpCol + 1,
-      cacheKey,
-    });
-  }
-
-  if (!requests.length) {
-    return {
-      batch: null,
-      queued: 0,
-      directWrites: 0,
-      cacheWrites,
-      skipped,
-    };
-  }
-
-  const content = buildOpenAIBatchFileContent_(requests);
-  const inputFile = uploadOpenAIBatchInputFile_(content);
-  const batch = createOpenAIBatch_(inputFile.id, {
-    task: 'intake_blueprint',
-    request_count: String(requests.length),
-  });
-  saveOpenAIBatchItemMappings_(batch.id, requests);
-  setLatestOpenAIBatchId_(batch.id);
-
-  return {
-    batch,
-    queued: requests.length,
-    directWrites: 0,
-    cacheWrites,
-    skipped,
-  };
-}
-
-function normalizeBatchBlueprintOutput_(output) {
-  const raw = String(output || '').trim();
-  if (!raw) return '';
-
-  try {
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === 'object' && 'blueprint' in obj) {
-      return normalizeBlueprintValue_(obj.blueprint);
-    }
-  } catch (_) { }
-
-  return normalizeBlueprintValue_(raw);
 }
 
 // =========================
