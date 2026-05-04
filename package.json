@@ -2,6 +2,7 @@
   "name": "personalization-scripts",
   "private": true,
   "scripts": {
+    "test": "bun test",
     "clasp:status": "clasp show-file-status",
     "clasp:pull": "clasp pull",
     "clasp:push": "clasp push",

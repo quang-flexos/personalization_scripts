@@ -35,6 +35,7 @@ var PERSONALIZED_DOC_CFG = Object.freeze({
   STATUS: {
     READY: 'READY',
     BLOCKED: 'BLOCKED',
+    PLACEHOLDER_SYNCED: 'PLACEHOLDER_SYNCED',
     DOC_READY: 'DOC_READY',
     PDF_READY: 'PDF_READY',
     KIT_SYNCED: 'KIT_SYNCED',
@@ -138,8 +139,12 @@ function pdRunFullDelivery_(sheet, rows) {
   const preflight = pdRunPreflight_(sheet, rows);
   const build = pdRunDocAndPdfBuild_(sheet, preflight.readyRows);
   const sync = pdRunPdfSync_(sheet, build.successfulRows);
+  const placeholderRows = preflight.blockedRows || [];
+  const placeholderSync = placeholderRows.length
+    ? pdRunPlaceholderPdfSync_(sheet, placeholderRows, preflight.blockedRowMessages)
+    : pdBuildEmptyPlaceholderSyncResult_();
 
-  return { preflight, build, sync };
+  return { preflight, build, sync, placeholderSync };
 }
 
 function pdBuildFullDeliveryMessage_(result) {
@@ -156,7 +161,12 @@ function pdBuildFullDeliveryMessage_(result) {
     '',
     `Kit synced: ${result.sync.synced}`,
     `Sync blocked: ${result.sync.blocked}`,
-    `Total errors: ${result.preflight.errors + result.build.errors + result.sync.errors}`,
+    '',
+    `Placeholder URLs created: ${result.placeholderSync.placeholdersCreated}`,
+    `Placeholder URLs reused: ${result.placeholderSync.placeholdersReused}`,
+    `Placeholder URLs synced to Kit: ${result.placeholderSync.synced}`,
+    `Placeholder sync blocked: ${result.placeholderSync.blocked}`,
+    `Total errors: ${result.preflight.errors + result.build.errors + result.sync.errors + result.placeholderSync.errors}`,
   ].join('\n');
 }
 
@@ -202,6 +212,8 @@ function pdRunPreflight_(sheet, rows) {
   let skipped = 0;
   let errors = 0;
   const readyRows = [];
+  const blockedRows = [];
+  const blockedRowMessages = {};
 
   for (const rowNumber of rows) {
     const row = context.values[rowNumber - 1] || [];
@@ -217,14 +229,17 @@ function pdRunPreflight_(sheet, rows) {
       const evaluation = pdEvaluateRowReadiness_(context, row);
 
       if (!evaluation.ready) {
+        const blockerMessage = pdBuildBlockerMessage_(evaluation.blockers);
         pdWriteStatus_(
           sheet,
           rowNumber,
           statusCol,
           PERSONALIZED_DOC_CFG.STATUS.BLOCKED,
-          pdBuildBlockerMessage_(evaluation.blockers)
+          blockerMessage
         );
         blocked++;
+        blockedRows.push(rowNumber);
+        blockedRowMessages[rowNumber] = blockerMessage;
         continue;
       }
 
@@ -240,7 +255,7 @@ function pdRunPreflight_(sheet, rows) {
     }
   }
 
-  return { ready, blocked, skipped, errors, readyRows };
+  return { ready, blocked, skipped, errors, readyRows, blockedRows, blockedRowMessages };
 }
 
 function pdRunDocAndPdfBuild_(sheet, rows) {
@@ -327,6 +342,85 @@ function pdRunPdfSync_(sheet, rows) {
   }
 
   return { synced, blocked, skipped, errors };
+}
+
+function pdRunPlaceholderPdfSync_(sheet, rows, blockerMessages) {
+  if (!rows.length) {
+    return pdBuildEmptyPlaceholderSyncResult_();
+  }
+
+  const context = pdLoadRunContext_(sheet, false);
+  const pdfUrlCol = pdEnsureOutputColumn_(sheet, context.headers, PERSONALIZED_DOC_CFG.PDF_URL_HEADER);
+  const statusCol = pdEnsureOutputColumn_(sheet, context.headers, PERSONALIZED_DOC_CFG.DELIVERY_STATUS_HEADER);
+  const kitFieldKey = pdEnsureKitCustomFieldKey_(PERSONALIZED_DOC_CFG.KIT_FIELD_LABEL);
+  const folder = pdEnsureTabFolder_(sheet.getName());
+
+  let placeholdersCreated = 0;
+  let placeholdersReused = 0;
+  let synced = 0;
+  let blocked = 0;
+  let skipped = 0;
+  let errors = 0;
+
+  for (const rowNumber of rows) {
+    const row = context.values[rowNumber - 1] || [];
+    const email = pdGetHeaderValue_(context.headers, row, PERSONALIZED_DOC_CFG.EMAIL_HEADER);
+
+    if (!email) {
+      pdWriteStatus_(sheet, rowNumber, statusCol, PERSONALIZED_DOC_CFG.STATUS.BLOCKED, 'Missing EMAIL.');
+      skipped++;
+      continue;
+    }
+
+    try {
+      let pdfUrl = pdGetHeaderValue_(context.headers, row, PERSONALIZED_DOC_CFG.PDF_URL_HEADER);
+      const existingPdfFile = pdGetDriveFileIfAccessible_(pdTryExtractDriveFileIdFromUrl_(pdfUrl));
+
+      if (existingPdfFile) {
+        pdfUrl = existingPdfFile.getUrl();
+        placeholdersReused++;
+      } else {
+        const placeholderFile = pdCreatePlaceholderPdfFile_(folder, context.headers, row, email);
+        pdfUrl = placeholderFile.getUrl();
+        sheet.getRange(rowNumber, pdfUrlCol + 1).setValue(pdfUrl).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
+        placeholdersCreated++;
+      }
+
+      pdSyncValueToKit_(email, kitFieldKey, pdfUrl);
+      pdWriteStatus_(
+        sheet,
+        rowNumber,
+        statusCol,
+        PERSONALIZED_DOC_CFG.STATUS.PLACEHOLDER_SYNCED,
+        pdBuildPlaceholderSyncMessage_(blockerMessages && blockerMessages[rowNumber])
+      );
+      synced++;
+    } catch (error) {
+      pdWriteStatus_(sheet, rowNumber, statusCol, PERSONALIZED_DOC_CFG.STATUS.ERROR, error.message);
+      errors++;
+    }
+  }
+
+  return { placeholdersCreated, placeholdersReused, synced, blocked, skipped, errors };
+}
+
+function pdBuildEmptyPlaceholderSyncResult_() {
+  return { placeholdersCreated: 0, placeholdersReused: 0, synced: 0, blocked: 0, skipped: 0, errors: 0 };
+}
+
+function pdBuildPlaceholderSyncMessage_(blockerMessage) {
+  const lines = [
+    'Placeholder PDF link synced to Kit.',
+    'The final PDF will update this same Drive URL once all required info is available.',
+  ];
+  const normalizedBlockerMessage = String(blockerMessage || '').trim();
+
+  if (normalizedBlockerMessage) {
+    lines.push('');
+    lines.push(normalizedBlockerMessage);
+  }
+
+  return lines.join('\n');
 }
 
 function pdLoadRunContext_(sheet, includeTemplate) {
@@ -718,6 +812,70 @@ function pdBuildDocBuildMessage_(evaluation, warnings) {
   lines.push(uniqueWarnings.join('\n\n'));
 
   return lines.join('\n');
+}
+
+function pdCreatePlaceholderPdfFile_(folder, headers, row, email) {
+  const fileName = pdBuildPlaceholderPdfName_(headers, row, email);
+  return folder.createFile(pdBuildPlaceholderPdfBlob_(fileName));
+}
+
+function pdBuildPlaceholderPdfName_(headers, row, email) {
+  const name = pdGetFirstPresentValue_(headers, row, ['NAME', 'FULL_NAME', 'FIRST_NAME']) || email;
+  return `Personalized AILA Prompt Guide - ${name} - pending.pdf`;
+}
+
+function pdBuildPlaceholderPdfBlob_(fileName) {
+  return Utilities
+    .newBlob(pdBuildPlaceholderPdfContent_(), MimeType.PDF, fileName)
+    .setName(fileName);
+}
+
+function pdBuildPlaceholderPdfContent_() {
+  return pdBuildSimplePdf_([
+    'Your personalized AILA prompt guide is being prepared.',
+    'This link is reserved now and will update automatically when your final PDF is ready.',
+  ]);
+}
+
+function pdBuildSimplePdf_(lines) {
+  const escapedLines = (lines || []).map(line => pdEscapePdfText_(line));
+  const textOps = escapedLines.map((line, index) => {
+    const y = 700 - (index * 24);
+    return `BT /F1 12 Tf 72 ${y} Td (${line}) Tj ET`;
+  }).join('\n');
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    `<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`,
+  ];
+  let pdf = '%PDF-1.4\n';
+  const offsets = [0];
+
+  for (let index = 0; index < objects.length; index++) {
+    offsets.push(pdf.length);
+    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
+  }
+
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += '0000000000 65535 f \n';
+
+  for (let index = 1; index < offsets.length; index++) {
+    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+  }
+
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
+  return pdf;
+}
+
+function pdEscapePdfText_(text) {
+  return String(text || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
 }
 
 function pdGetValueForPlaceholder_(headers, row, placeholder) {
