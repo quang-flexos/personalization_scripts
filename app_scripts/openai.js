@@ -278,6 +278,7 @@ function openaiGenerateSelectedRowsSelectedCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
@@ -301,6 +302,7 @@ function openaiGenerateSelectedRowsAllCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
@@ -324,6 +326,7 @@ function openaiCreateBatchSelectedRowsSelectedCourseCols() {
   if (!ranges.length) return ui.alert('No selection.');
 
   const lastRow = sh.getLastRow();
+  const lastCol = sh.getLastColumn();
   if (lastRow < 3) return ui.alert('No data rows.');
 
   const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
