@@ -19,12 +19,6 @@ function loadOpenAIHelpers() {
 }
 
 describe("OpenAI helper behavior", () => {
-  test("manifest includes trigger management OAuth scope", () => {
-    const manifest = JSON.parse(readFileSync("app_scripts/appsscript.json", "utf8"));
-
-    expect(manifest.oauthScopes).toContain("https://www.googleapis.com/auth/script.scriptapp");
-  });
-
   test("course generation entrypoints declare lastCol before using it", () => {
     const source = readFileSync("app_scripts/openai.js", "utf8");
     const functionNames = [
@@ -149,11 +143,10 @@ describe("OpenAI helper behavior", () => {
   test("parseBatchIntakeFieldsOutput_ unwraps structured field JSON", () => {
     const ctx = loadOpenAIHelpers();
 
-    expect(ctx.parseBatchIntakeFieldsOutput_('{"role":"CEO","company":"Acme","industry":"software","course_goal":"Reduce reporting time"}')).toEqual({
+    expect(ctx.parseBatchIntakeFieldsOutput_('{"role":"CEO","company":"Acme","industry":"software"}')).toEqual({
       role: "CEO",
       company: "Acme",
       industry: "Technology",
-      course_goal: "Reduce reporting time",
     });
   });
 

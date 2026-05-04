@@ -102,6 +102,17 @@ function buildSpreadsheetMenus_() {
         "Generate selected rows + ALL COURSE_ cols",
         "openaiGenerateSelectedRowsAllCourseCols",
       )
+      .addSeparator()
+      .addItem(
+        "Create Batch: selected rows + selected COURSE_ cols",
+        "openaiCreateBatchSelectedRowsSelectedCourseCols",
+      )
+      .addItem(
+        "Create Batch: selected rows + ALL COURSE_ cols",
+        "openaiCreateBatchSelectedRowsAllCourseCols",
+      )
+      .addItem("Check latest batch", "openaiCheckLatestBatch")
+      .addItem("Import latest batch results", "openaiImportLatestBatchResults")
       .addToUi();
   });
 
