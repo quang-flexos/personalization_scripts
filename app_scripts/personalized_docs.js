@@ -1,14 +1,14 @@
 /**
  * personalized_docs.js
  *
- * Drop this file into your existing Apps Script project.
+ * Deploy this file with clasp as part of the Apps Script project.
  *
- * Then add this line inside your existing onOpen():
+ * The menu entry point still needs this line inside onOpen():
  *   addPersonalizedDocsMenu_(ui);
  */
 
 // Use var here so Apps Script is less likely to fail at load time if this file
-// is accidentally duplicated during a manual paste/update.
+// is accidentally duplicated during a partial sync or update.
 var PERSONALIZED_DOC_CFG = Object.freeze({
   DEFAULT_TEMPLATE_DOC_ID: '1Iku5BhwWC3KXMsn7HitAmzQBDBoUAoC7nvfnTKvUuA0',
   TEMPLATE_DOC_IDS_BY_SHEET: Object.freeze({
