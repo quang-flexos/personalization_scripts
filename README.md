@@ -339,9 +339,6 @@ That means a learner is delivered only when all of these are true:
 **OpenAI**
 
 - generate personalized `COURSE_*` content
-- create an async OpenAI Batch API job for selected missing `COURSE_*` content
-- check and import the latest OpenAI Batch API job results
-- hidden `_OPENAI_CACHE`, `_OPENAI_USAGE`, and `_OPENAI_BATCH_ITEMS` sheets are created automatically when needed
 
 **Intake**
 
@@ -374,8 +371,6 @@ Keep the local source in `.js`. `clasp` will sync that source into Apps Script.
 - The runtime reads the live Google Docs and the live Google Sheet.
 - `[[...]]` support currently exists only in row `2` template cells for generated `COURSE_*` content.
 - `{{ ... }}` replacement in the learner-facing guide still expects exact matching live sheet headers.
-- OpenAI Batch API import writes only blank target cells, so existing reviewed content is not overwritten.
-- OpenAI Batch API completion is async; use `Check latest batch` before `Import latest batch results`.
 
 ## Quick Troubleshooting
 

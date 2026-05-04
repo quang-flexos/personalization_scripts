@@ -10,20 +10,11 @@ const OPENAI_PROMPT_ID = 'pmpt_697c7885ce988197a458c2ec8d49613e0e39c7a7a0def1b9'
 
 const OPENAI_CFG = {
   API_URL: 'https://api.openai.com/v1/responses',
-  BATCH_API_URL: 'https://api.openai.com/v1/batches',
-  FILES_API_URL: 'https://api.openai.com/v1/files',
   MAX_ROWS_PER_RUN: 100,
   SLEEP_MS: 300,
-  STORE: false,
+  STORE: true,
   REASONING_SUMMARY: 'auto',
   COURSE_PREFIX: 'COURSE_',
-  COURSE_MODEL_LABEL: `prompt:${OPENAI_PROMPT_ID}`,
-  PROMPT_CACHE_KEY: 'personalized-course-v1',
-  PROMPT_CACHE_RETENTION: 'in_memory',
-  CACHE_SHEET_NAME: '_OPENAI_CACHE',
-  USAGE_SHEET_NAME: '_OPENAI_USAGE',
-  BATCH_ITEMS_SHEET_NAME: '_OPENAI_BATCH_ITEMS',
-  LATEST_BATCH_ID_PROPERTY: 'OPENAI_LATEST_BATCH_ID',
 };
 
 // =========================
@@ -31,16 +22,6 @@ const OPENAI_CFG = {
 // =========================
 const INTAKE_MODEL = 'gpt-5.4-mini-2026-03-17';
 const INTAKE_API_URL = 'https://api.openai.com/v1/responses';
-
-const INTAKE_CFG = {
-  BLUEPRINT_MODEL: INTAKE_MODEL,
-  BLUEPRINT_REASONING_EFFORT: 'high',
-  FIELDS_MODEL: 'gpt-5.4-nano',
-  FIELDS_REASONING_EFFORT: 'low',
-  PROMPT_CACHE_RETENTION: 'in_memory',
-  BLUEPRINT_CACHE_KEY: 'intake-blueprint-v1',
-  FIELDS_CACHE_KEY: 'intake-fields-v1',
-};
 
 const INTAKE_OUTPUT_HEADERS = {
   BLUEPRINT: 'BLUEPRINT',
@@ -314,79 +295,6 @@ function openaiGenerateSelectedRowsAllCourseCols() {
   ui.alert(`Done. Wrote: ${result.writes}, Skipped: ${result.skipped}, Errors: ${result.errors}`);
 }
 
-function openaiCreateBatchSelectedRowsSelectedCourseCols() {
-  const ui = SpreadsheetApp.getUi();
-  const sh = SpreadsheetApp.getActiveSheet();
-
-  const ranges = getSelectedRanges_(sh);
-  if (!ranges.length) return ui.alert('No selection.');
-
-  const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
-  if (lastRow < 3) return ui.alert('No data rows.');
-
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  const headers = data[0].map(normalizeHeader_);
-  const rows = getSelectedRowsFromRanges_(ranges, lastRow, 3);
-  if (!rows.length) return ui.alert('Select at least one data row (row 3+).');
-
-  const cols = getSelectedCourseColsFromRanges_(ranges, lastCol, headers, OPENAI_CFG.COURSE_PREFIX);
-  if (!cols.length) return ui.alert('No COURSE_ columns in selection.');
-
-  const result = createOpenAICourseBatch_(sh, headers, data, rows, cols);
-  ui.alert(formatOpenAIBatchCreateMessage_(result));
-}
-
-function openaiCreateBatchSelectedRowsAllCourseCols() {
-  const ui = SpreadsheetApp.getUi();
-  const sh = SpreadsheetApp.getActiveSheet();
-
-  const ranges = getSelectedRanges_(sh);
-  if (!ranges.length) return ui.alert('No selection.');
-
-  const lastRow = sh.getLastRow();
-  const lastCol = sh.getLastColumn();
-  if (lastRow < 3) return ui.alert('No data rows.');
-
-  const data = sh.getRange(1, 1, lastRow, lastCol).getValues();
-  const headers = data[0].map(normalizeHeader_);
-  const rows = getSelectedRowsFromRanges_(ranges, lastRow, 3);
-  if (!rows.length) return ui.alert('Select at least one data row (row 3+).');
-
-  const cols = getAllCourseCols_(headers, OPENAI_CFG.COURSE_PREFIX);
-  if (!cols.length) return ui.alert('No COURSE_ columns found.');
-
-  const result = createOpenAICourseBatch_(sh, headers, data, rows, cols);
-  ui.alert(formatOpenAIBatchCreateMessage_(result));
-}
-
-function openaiCheckLatestBatch() {
-  const ui = SpreadsheetApp.getUi();
-  const batchId = getLatestOpenAIBatchId_();
-  if (!batchId) return ui.alert('No latest OpenAI batch id saved.');
-
-  const batch = retrieveOpenAIBatch_(batchId);
-  ui.alert(formatOpenAIBatchStatusMessage_(batch));
-}
-
-function openaiImportLatestBatchResults() {
-  const ui = SpreadsheetApp.getUi();
-  const sh = SpreadsheetApp.getActiveSheet();
-  const batchId = getLatestOpenAIBatchId_();
-  if (!batchId) return ui.alert('No latest OpenAI batch id saved.');
-
-  const result = importOpenAIBatchResults_(sh, batchId);
-  ui.alert(
-    [
-      `Batch: ${batchId}`,
-      `Status: ${result.status}`,
-      `Wrote: ${result.writes}`,
-      `Skipped: ${result.skipped}`,
-      `Errors: ${result.errors}`,
-    ].join('\n'),
-  );
-}
-
 function runOpenAIGenerator_(sh, headers, data, rows, cols) {
   const bpCol = headers.findIndex(h => String(h).toUpperCase() === INTAKE_OUTPUT_HEADERS.BLUEPRINT);
   if (bpCol === -1) throw new Error('Missing BLUEPRINT header');
@@ -411,8 +319,6 @@ function runOpenAIGenerator_(sh, headers, data, rows, cols) {
   }
 
   if (!colTemplates.length) throw new Error('No COURSE_ columns with templates in row 2');
-
-  const cache = loadOpenAICacheMap_();
 
   for (const r of rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN)) {
     const blueprint = String(data[r - 1][bpCol] || '').trim();
@@ -440,14 +346,7 @@ function runOpenAIGenerator_(sh, headers, data, rows, cols) {
       }
 
       try {
-        const payload = buildCoursePayload_(blueprint, course_instruction);
-        const cacheKey = buildOpenAICacheKey_('course', payload);
-        const cached = cache[cacheKey];
-        const output = cached ? cached.value : callOpenAI_(blueprint, course_instruction, {
-          cache,
-          cacheKey,
-          payload,
-        });
+        const output = callOpenAI_(blueprint, course_instruction);
         sh.getRange(r, ct.col + 1).setValue(output);
         data[r - 1][ct.col] = output;
         writes++;
@@ -462,8 +361,8 @@ function runOpenAIGenerator_(sh, headers, data, rows, cols) {
   return { writes, skipped, errors };
 }
 
-function buildCoursePayload_(blueprint, course_instruction) {
-  return {
+function callOpenAI_(blueprint, course_instruction) {
+  const payload = {
     prompt: {
       id: OPENAI_PROMPT_ID,
       variables: { blueprint, course_instruction },
@@ -471,205 +370,22 @@ function buildCoursePayload_(blueprint, course_instruction) {
     input: [],
     reasoning: { summary: OPENAI_CFG.REASONING_SUMMARY },
     store: OPENAI_CFG.STORE,
-    prompt_cache_key: OPENAI_CFG.PROMPT_CACHE_KEY,
-    prompt_cache_retention: OPENAI_CFG.PROMPT_CACHE_RETENTION,
   };
-}
 
-function callOpenAI_(blueprint, course_instruction, options) {
-  const payload = options?.payload || buildCoursePayload_(blueprint, course_instruction);
-  const cacheKey = options?.cacheKey || buildOpenAICacheKey_('course', payload);
-  const cache = options?.cache || loadOpenAICacheMap_();
-
-  if (cache[cacheKey]?.value) {
-    return cache[cacheKey].value;
-  }
-
-  const json = fetchOpenAIJson_(OPENAI_CFG.API_URL, payload, {
-    task: 'course',
-    model: OPENAI_CFG.COURSE_MODEL_LABEL,
-    cacheKey,
+  const res = UrlFetchApp.fetch(OPENAI_CFG.API_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
   });
-  const output = extractText_(json);
-  saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL_LABEL, output, json?.id);
-  cache[cacheKey] = { value: output };
-  return output;
-}
 
-function createOpenAICourseBatch_(sh, headers, data, rows, cols) {
-  const bpCol = headers.findIndex(h => String(h).toUpperCase() === INTAKE_OUTPUT_HEADERS.BLUEPRINT);
-  if (bpCol === -1) throw new Error('Missing BLUEPRINT header');
-
-  const colTemplates = buildCourseColumnTemplates_(headers, data, cols);
-  if (!colTemplates.length) throw new Error('No COURSE_ columns with templates in row 2');
-
-  const cache = loadOpenAICacheMap_();
-  const requests = [];
-  let directWrites = 0;
-  let cacheWrites = 0;
-  let skipped = 0;
-
-  for (const r of rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN)) {
-    const blueprint = String(data[r - 1][bpCol] || '').trim();
-    if (!blueprint) {
-      skipped++;
-      continue;
-    }
-
-    const rowVars = rowToVars_(headers, data[r - 1]);
-
-    for (const ct of colTemplates) {
-      const existing = String(data[r - 1][ct.col] || '').trim();
-      if (existing) {
-        skipped++;
-        continue;
-      }
-
-      const course_instruction = interpolate_(ct.template, rowVars);
-      if (ct.directMode) {
-        sh.getRange(r, ct.col + 1).setValue(course_instruction);
-        data[r - 1][ct.col] = course_instruction;
-        directWrites++;
-        continue;
-      }
-
-      const payload = buildCoursePayload_(blueprint, course_instruction);
-      const cacheKey = buildOpenAICacheKey_('course', payload);
-      const cached = cache[cacheKey];
-      if (cached?.value) {
-        sh.getRange(r, ct.col + 1).setValue(cached.value);
-        data[r - 1][ct.col] = cached.value;
-        cacheWrites++;
-        continue;
-      }
-
-      requests.push({
-        customId: buildCourseBatchCustomId_(r, ct.col + 1, cacheKey),
-        body: payload,
-        rowNumber: r,
-        colNumber: ct.col + 1,
-        cacheKey,
-      });
-    }
+  const json = JSON.parse(res.getContentText());
+  if (res.getResponseCode() >= 300) {
+    throw new Error(json?.error?.message || 'OpenAI error');
   }
 
-  if (!requests.length) {
-    return {
-      batch: null,
-      queued: 0,
-      directWrites,
-      cacheWrites,
-      skipped,
-    };
-  }
-
-  const content = buildOpenAIBatchFileContent_(requests);
-  const inputFile = uploadOpenAIBatchInputFile_(content);
-  const batch = createOpenAIBatch_(inputFile.id, {
-    task: 'course',
-    request_count: String(requests.length),
-  });
-  saveOpenAIBatchItemMappings_(batch.id, requests);
-  setLatestOpenAIBatchId_(batch.id);
-
-  return {
-    batch,
-    queued: requests.length,
-    directWrites,
-    cacheWrites,
-    skipped,
-  };
-}
-
-function buildCourseColumnTemplates_(headers, data, cols) {
-  const colTemplates = [];
-  for (const c of cols) {
-    const header = headers[c] || '';
-    if (/_BEFORE$/i.test(header) || /_AFTER$/i.test(header)) continue;
-
-    const templateRaw = String(data[1][c] || '').trim();
-    if (!templateRaw) continue;
-
-    const directMode = templateRaw.startsWith('=');
-    const template = compileCourseInstructionTemplate_(
-      directMode ? templateRaw.slice(1).trim() : templateRaw,
-    );
-    colTemplates.push({ col: c, template, directMode });
-  }
-
-  return colTemplates;
-}
-
-function buildCourseBatchCustomId_(rowNumber, colNumber, cacheKey) {
-  return `course:r${rowNumber}:c${colNumber}:k${cacheKey.slice(-16)}`;
-}
-
-function parseCourseBatchCustomId_(customId) {
-  const match = String(customId || '').match(/^course:r(\d+):c(\d+):k(.+)$/);
-  if (!match) return null;
-
-  return {
-    rowNumber: Number(match[1]),
-    colNumber: Number(match[2]),
-    cacheKeyTail: match[3],
-  };
-}
-
-function importOpenAIBatchResults_(sh, batchId) {
-  const batch = retrieveOpenAIBatch_(batchId);
-  if (batch.status !== 'completed') {
-    return { status: batch.status, writes: 0, skipped: 0, errors: 0 };
-  }
-
-  if (!batch.output_file_id) {
-    throw new Error('Batch completed without output_file_id');
-  }
-
-  const rows = downloadOpenAIBatchOutputRows_(batch.output_file_id);
-  let writes = 0;
-  let skipped = 0;
-  let errors = 0;
-  const cache = loadOpenAICacheMap_();
-  const batchItemMap = loadOpenAIBatchItemMap_(batchId);
-
-  for (const item of rows) {
-    const target = parseCourseBatchCustomId_(item.custom_id);
-    if (!target) {
-      skipped++;
-      continue;
-    }
-
-    const responseBody = item.response?.body;
-    if (!responseBody || item.error || item.response?.status_code >= 300) {
-      sh.getRange(target.rowNumber, target.colNumber).setValue(
-        'ERROR: ' + (item.error?.message || responseBody?.error?.message || 'OpenAI batch item failed'),
-      );
-      errors++;
-      continue;
-    }
-
-    const current = String(sh.getRange(target.rowNumber, target.colNumber).getValue() || '').trim();
-    if (current) {
-      skipped++;
-      continue;
-    }
-
-    const output = extractText_(responseBody);
-    if (!output) {
-      sh.getRange(target.rowNumber, target.colNumber).setValue('ERROR: Empty OpenAI batch output');
-      errors++;
-      continue;
-    }
-
-    const cacheKey = batchItemMap[item.custom_id]?.cacheKey || `course:${target.cacheKeyTail}`;
-    sh.getRange(target.rowNumber, target.colNumber).setValue(output);
-    saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL_LABEL, output, responseBody?.id);
-    cache[cacheKey] = { value: output };
-    appendOpenAIUsage_('course_batch', OPENAI_CFG.COURSE_MODEL_LABEL, cacheKey, 'ok', responseBody);
-    writes++;
-  }
-
-  return { status: batch.status, writes, skipped, errors };
+  return extractText_(json);
 }
 
 // =========================
@@ -1243,74 +959,6 @@ function toTitleCaseIndustry_(value) {
 }
 
 function callOpenAIIntakeBlueprint_(transcript) {
-  const payload = buildIntakeBlueprintPayload_(transcript);
-  const cacheKey = buildOpenAICacheKey_('intake_blueprint', payload);
-  const cache = loadOpenAICacheMap_();
-  if (cache[cacheKey]?.value) {
-    return normalizeBlueprintValue_(cache[cacheKey].value);
-  }
-
-  const json = fetchOpenAIJson_(INTAKE_API_URL, payload, {
-    task: 'intake_blueprint',
-    model: INTAKE_CFG.BLUEPRINT_MODEL,
-    cacheKey,
-  });
-  const raw = extractText_(json);
-
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (e) {
-    throw new Error('Structured output JSON.parse failed: ' + e.message + ' | raw=' + String(raw).slice(0, 200));
-  }
-
-  if (!obj || typeof obj !== 'object') throw new Error('Structured output missing object');
-  const blueprint = normalizeBlueprintValue_(obj.blueprint);
-  saveOpenAICacheValue_(cacheKey, 'intake_blueprint', INTAKE_CFG.BLUEPRINT_MODEL, blueprint, json?.id);
-  cache[cacheKey] = { value: blueprint };
-  return blueprint;
-}
-
-function callOpenAIIntakeFields_(transcript) {
-  const payload = buildIntakeFieldsPayload_(transcript);
-  const cacheKey = buildOpenAICacheKey_('intake_fields', payload);
-  const cache = loadOpenAICacheMap_();
-  if (cache[cacheKey]?.value) {
-    const cached = JSON.parse(cache[cacheKey].value);
-    return {
-      role: normalizeExtractedFieldValue_(cached.role),
-      company: normalizeExtractedFieldValue_(cached.company),
-      industry: normalizeIndustryValue_(cached.industry),
-    };
-  }
-
-  const json = fetchIntakeJson_(payload, {
-    task: 'intake_fields',
-    model: INTAKE_CFG.FIELDS_MODEL,
-    cacheKey,
-  });
-  const raw = extractText_(json);
-
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (e) {
-    throw new Error('Structured output JSON.parse failed: ' + e.message + ' | raw=' + String(raw).slice(0, 200));
-  }
-
-  if (!obj || typeof obj !== 'object') throw new Error('Structured output missing object');
-
-  const fields = {
-    role: normalizeExtractedFieldValue_(obj.role),
-    company: normalizeExtractedFieldValue_(obj.company),
-    industry: normalizeIndustryValue_(obj.industry),
-  };
-  saveOpenAICacheValue_(cacheKey, 'intake_fields', INTAKE_CFG.FIELDS_MODEL, JSON.stringify(fields), json?.id);
-  cache[cacheKey] = { value: JSON.stringify(fields) };
-  return fields;
-}
-
-function buildIntakeBlueprintPayload_(transcript) {
   const instructions =
     INTAKE_BLUEPRINT_SYSTEM_PROMPT +
     '\n\n==================================================\n' +
@@ -1330,14 +978,12 @@ function buildIntakeBlueprintPayload_(transcript) {
     },
   };
 
-  return {
-    model: INTAKE_CFG.BLUEPRINT_MODEL,
+  const payload = {
+    model: INTAKE_MODEL,
     instructions,
     input: transcript,
     store: false,
-    reasoning: { effort: INTAKE_CFG.BLUEPRINT_REASONING_EFFORT },
-    prompt_cache_key: INTAKE_CFG.BLUEPRINT_CACHE_KEY,
-    prompt_cache_retention: INTAKE_CFG.PROMPT_CACHE_RETENTION,
+    reasoning: { effort: 'high' },
     text: {
       verbosity: 'low',
       format: {
@@ -1347,6 +993,55 @@ function buildIntakeBlueprintPayload_(transcript) {
         schema,
       },
     },
+  };
+
+  const res = UrlFetchApp.fetch(INTAKE_API_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
+  });
+
+  if (res.getResponseCode() >= 300) {
+    const txt = res.getContentText();
+    let msg = 'OpenAI error';
+    try { msg = JSON.parse(txt)?.error?.message || msg; } catch (_) { }
+    throw new Error(msg);
+  }
+
+  const json = JSON.parse(res.getContentText());
+  const raw = extractText_(json);
+
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('Structured output JSON.parse failed: ' + e.message + ' | raw=' + String(raw).slice(0, 200));
+  }
+
+  if (!obj || typeof obj !== 'object') throw new Error('Structured output missing object');
+  return normalizeBlueprintValue_(obj.blueprint);
+}
+
+function callOpenAIIntakeFields_(transcript) {
+  const payload = buildIntakeFieldsPayload_(transcript);
+  const json = fetchIntakeJson_(payload);
+  const raw = extractText_(json);
+
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    throw new Error('Structured output JSON.parse failed: ' + e.message + ' | raw=' + String(raw).slice(0, 200));
+  }
+
+  if (!obj || typeof obj !== 'object') throw new Error('Structured output missing object');
+
+  return {
+    role: normalizeExtractedFieldValue_(obj.role),
+    company: normalizeExtractedFieldValue_(obj.company),
+    industry: normalizeIndustryValue_(obj.industry),
   };
 }
 
@@ -1372,13 +1067,11 @@ function buildIntakeFieldsPayload_(transcript) {
   };
 
   return {
-    model: INTAKE_CFG.FIELDS_MODEL,
+    model: INTAKE_MODEL,
     instructions: INTAKE_FIELDS_SYSTEM_PROMPT,
     input: transcript,
     store: false,
-    reasoning: { effort: INTAKE_CFG.FIELDS_REASONING_EFFORT },
-    prompt_cache_key: INTAKE_CFG.FIELDS_CACHE_KEY,
-    prompt_cache_retention: INTAKE_CFG.PROMPT_CACHE_RETENTION,
+    reasoning: { effort: 'high' },
     text: {
       verbosity: 'low',
       format: {
@@ -1391,12 +1084,23 @@ function buildIntakeFieldsPayload_(transcript) {
   };
 }
 
-function fetchIntakeJson_(payload, meta) {
-  return fetchOpenAIJson_(INTAKE_API_URL, payload, meta || {
-    task: 'intake',
-    model: payload?.model || INTAKE_MODEL,
-    cacheKey: '',
+function fetchIntakeJson_(payload) {
+  const res = UrlFetchApp.fetch(INTAKE_API_URL, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true,
   });
+
+  if (res.getResponseCode() >= 300) {
+    const txt = res.getContentText();
+    let msg = 'OpenAI error';
+    try { msg = JSON.parse(txt)?.error?.message || msg; } catch (_) { }
+    throw new Error(msg);
+  }
+
+  return JSON.parse(res.getContentText());
 }
 
 function loadEnrichmentLookup_() {
@@ -1534,359 +1238,6 @@ function normalizeInferredInstructionText_(value) {
 // =========================
 // OPENAI HELPERS
 // =========================
-function fetchOpenAIJson_(url, payload, meta) {
-  const res = UrlFetchApp.fetch(url, {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true,
-  });
-
-  const txt = res.getContentText();
-  let json = {};
-  try {
-    json = JSON.parse(txt);
-  } catch (e) {
-    appendOpenAIUsage_(meta?.task || 'unknown', meta?.model || payload?.model || '', meta?.cacheKey || '', 'parse_error', null);
-    throw new Error('OpenAI JSON.parse failed: ' + e.message + ' | raw=' + String(txt).slice(0, 200));
-  }
-
-  if (res.getResponseCode() >= 300) {
-    appendOpenAIUsage_(meta?.task || 'unknown', meta?.model || payload?.model || '', meta?.cacheKey || '', 'error', json);
-    throw new Error(json?.error?.message || 'OpenAI error');
-  }
-
-  appendOpenAIUsage_(meta?.task || 'unknown', meta?.model || payload?.model || '', meta?.cacheKey || '', 'ok', json);
-  return json;
-}
-
-function uploadOpenAIBatchInputFile_(content) {
-  const blob = Utilities.newBlob(
-    content,
-    'application/jsonl',
-    `openai-course-batch-${new Date().toISOString()}.jsonl`,
-  );
-
-  const res = UrlFetchApp.fetch(OPENAI_CFG.FILES_API_URL, {
-    method: 'post',
-    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
-    payload: {
-      purpose: 'batch',
-      file: blob,
-    },
-    muteHttpExceptions: true,
-  });
-
-  const json = JSON.parse(res.getContentText());
-  if (res.getResponseCode() >= 300) {
-    throw new Error(json?.error?.message || 'OpenAI file upload error');
-  }
-
-  return json;
-}
-
-function createOpenAIBatch_(inputFileId, metadata) {
-  const payload = {
-    input_file_id: inputFileId,
-    endpoint: '/v1/responses',
-    completion_window: '24h',
-    metadata: metadata || {},
-  };
-
-  return fetchOpenAIJson_(OPENAI_CFG.BATCH_API_URL, payload, {
-    task: 'batch_create',
-    model: OPENAI_CFG.COURSE_MODEL_LABEL,
-    cacheKey: '',
-  });
-}
-
-function retrieveOpenAIBatch_(batchId) {
-  const res = UrlFetchApp.fetch(`${OPENAI_CFG.BATCH_API_URL}/${encodeURIComponent(batchId)}`, {
-    method: 'get',
-    contentType: 'application/json',
-    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
-    muteHttpExceptions: true,
-  });
-
-  const json = JSON.parse(res.getContentText());
-  if (res.getResponseCode() >= 300) {
-    throw new Error(json?.error?.message || 'OpenAI batch retrieve error');
-  }
-
-  return json;
-}
-
-function downloadOpenAIBatchOutputRows_(fileId) {
-  const res = UrlFetchApp.fetch(`${OPENAI_CFG.FILES_API_URL}/${encodeURIComponent(fileId)}/content`, {
-    method: 'get',
-    headers: { Authorization: `Bearer ${secret_('OPENAI_API_KEY')}` },
-    muteHttpExceptions: true,
-  });
-
-  if (res.getResponseCode() >= 300) {
-    let msg = 'OpenAI batch output download error';
-    try { msg = JSON.parse(res.getContentText())?.error?.message || msg; } catch (_) { }
-    throw new Error(msg);
-  }
-
-  return String(res.getContentText() || '')
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean)
-    .map(line => JSON.parse(line));
-}
-
-function buildOpenAIBatchFileContent_(requests) {
-  return requests.map(buildOpenAIBatchLine_).join('\n');
-}
-
-function buildOpenAIBatchLine_(request) {
-  return JSON.stringify({
-    custom_id: request.customId,
-    method: 'POST',
-    url: '/v1/responses',
-    body: request.body,
-  });
-}
-
-function formatOpenAIBatchCreateMessage_(result) {
-  if (!result.batch) {
-    return [
-      'No OpenAI batch created.',
-      `Direct writes: ${result.directWrites}`,
-      `Cache writes: ${result.cacheWrites}`,
-      `Skipped: ${result.skipped}`,
-    ].join('\n');
-  }
-
-  return [
-    `Batch created: ${result.batch.id}`,
-    `Status: ${result.batch.status}`,
-    `Queued API requests: ${result.queued}`,
-    `Direct writes: ${result.directWrites}`,
-    `Cache writes: ${result.cacheWrites}`,
-    `Skipped: ${result.skipped}`,
-    '',
-    'Use OpenAI > Check latest batch, then OpenAI > Import latest batch results after it completes.',
-  ].join('\n');
-}
-
-function formatOpenAIBatchStatusMessage_(batch) {
-  const counts = batch.request_counts || {};
-  return [
-    `Batch: ${batch.id}`,
-    `Status: ${batch.status}`,
-    `Total: ${counts.total || 0}`,
-    `Completed: ${counts.completed || 0}`,
-    `Failed: ${counts.failed || 0}`,
-    batch.output_file_id ? `Output file: ${batch.output_file_id}` : 'Output file: not ready',
-    batch.error_file_id ? `Error file: ${batch.error_file_id}` : '',
-  ].filter(Boolean).join('\n');
-}
-
-function setLatestOpenAIBatchId_(batchId) {
-  PropertiesService.getScriptProperties().setProperty(OPENAI_CFG.LATEST_BATCH_ID_PROPERTY, batchId);
-}
-
-function getLatestOpenAIBatchId_() {
-  return String(
-    PropertiesService.getScriptProperties().getProperty(OPENAI_CFG.LATEST_BATCH_ID_PROPERTY) || '',
-  ).trim();
-}
-
-function loadOpenAICacheMap_() {
-  const sheet = getOpenAICacheSheet_(false);
-  if (!sheet) return {};
-
-  const values = sheet.getDataRange().getValues();
-  const cache = {};
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r] || [];
-    const key = String(row[0] || '').trim();
-    if (!key) continue;
-    cache[key] = {
-      task: String(row[1] || ''),
-      model: String(row[2] || ''),
-      value: String(row[3] || ''),
-      responseId: String(row[4] || ''),
-      updatedAt: row[5],
-    };
-  }
-
-  return cache;
-}
-
-function saveOpenAICacheValue_(key, task, model, value, responseId) {
-  const cleanValue = String(value || '').trim();
-  if (!key || !cleanValue) return;
-
-  const sheet = getOpenAICacheSheet_(true);
-  const now = new Date();
-  const lastRow = sheet.getLastRow();
-  if (lastRow > 1) {
-    const keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
-    for (let i = 0; i < keys.length; i++) {
-      if (String(keys[i][0] || '') === key) {
-        sheet.getRange(i + 2, 1, 1, 6).setValues([[
-          key,
-          task,
-          model,
-          cleanValue,
-          responseId || '',
-          now,
-        ]]);
-        return;
-      }
-    }
-  }
-
-  sheet.appendRow([key, task, model, cleanValue, responseId || '', now]);
-}
-
-function appendOpenAIUsage_(task, model, cacheKey, status, resp) {
-  const sheet = getOpenAIUsageSheet_();
-  sheet.appendRow(extractOpenAIUsageRow_(task, model, cacheKey, status, resp));
-}
-
-function extractOpenAIUsageRow_(task, model, cacheKey, status, resp) {
-  const usage = resp?.usage || {};
-  const inputDetails = usage.input_tokens_details || usage.prompt_tokens_details || {};
-  const outputDetails = usage.output_tokens_details || usage.completion_tokens_details || {};
-
-  return [
-    new Date(),
-    task || '',
-    model || resp?.model || '',
-    cacheKey || '',
-    status || '',
-    resp?.id || '',
-    usage.input_tokens || usage.prompt_tokens || 0,
-    usage.output_tokens || usage.completion_tokens || 0,
-    usage.total_tokens || 0,
-    inputDetails.cached_tokens || 0,
-    outputDetails.reasoning_tokens || 0,
-  ];
-}
-
-function getOpenAICacheSheet_(createIfMissing) {
-  return getOpenAIInternalSheet_(
-    OPENAI_CFG.CACHE_SHEET_NAME,
-    ['key', 'task', 'model', 'value', 'response_id', 'updated_at'],
-    createIfMissing,
-  );
-}
-
-function getOpenAIUsageSheet_() {
-  return getOpenAIInternalSheet_(
-    OPENAI_CFG.USAGE_SHEET_NAME,
-    [
-      'timestamp',
-      'task',
-      'model',
-      'cache_key',
-      'status',
-      'response_id',
-      'input_tokens',
-      'output_tokens',
-      'total_tokens',
-      'cached_input_tokens',
-      'reasoning_tokens',
-    ],
-    true,
-  );
-}
-
-function getOpenAIBatchItemsSheet_(createIfMissing) {
-  return getOpenAIInternalSheet_(
-    OPENAI_CFG.BATCH_ITEMS_SHEET_NAME,
-    ['batch_id', 'custom_id', 'cache_key', 'row_number', 'col_number', 'created_at'],
-    createIfMissing,
-  );
-}
-
-function saveOpenAIBatchItemMappings_(batchId, requests) {
-  const sheet = getOpenAIBatchItemsSheet_(true);
-  const now = new Date();
-  const rows = requests.map(request => [
-    batchId,
-    request.customId,
-    request.cacheKey,
-    request.rowNumber,
-    request.colNumber,
-    now,
-  ]);
-
-  if (!rows.length) return;
-  sheet.getRange(sheet.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
-}
-
-function loadOpenAIBatchItemMap_(batchId) {
-  const sheet = getOpenAIBatchItemsSheet_(false);
-  if (!sheet) return {};
-
-  const values = sheet.getDataRange().getValues();
-  const map = {};
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r] || [];
-    if (String(row[0] || '') !== String(batchId || '')) continue;
-
-    const customId = String(row[1] || '').trim();
-    if (!customId) continue;
-
-    map[customId] = {
-      cacheKey: String(row[2] || '').trim(),
-      rowNumber: Number(row[3] || 0),
-      colNumber: Number(row[4] || 0),
-    };
-  }
-
-  return map;
-}
-
-function getOpenAIInternalSheet_(sheetName, headers, createIfMissing) {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = spreadsheet.getSheetByName(sheetName);
-  if (!sheet && !createIfMissing) return null;
-
-  if (!sheet) {
-    sheet = spreadsheet.insertSheet(sheetName);
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-    try { sheet.hideSheet(); } catch (_) { }
-    return sheet;
-  }
-
-  if (sheet.getLastRow() === 0) {
-    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  }
-
-  return sheet;
-}
-
-function buildOpenAICacheKey_(task, payload) {
-  const value = `${task}:${stableStringify_(payload)}`;
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, value);
-  const hex = digest.map(byte => {
-    const normalized = byte < 0 ? byte + 256 : byte;
-    return normalized.toString(16).padStart(2, '0');
-  }).join('');
-
-  return `${task}:${hex}`;
-}
-
-function stableStringify_(value) {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-
-  if (Array.isArray(value)) {
-    return '[' + value.map(stableStringify_).join(',') + ']';
-  }
-
-  const keys = Object.keys(value).sort();
-  return '{' + keys.map(key => JSON.stringify(key) + ':' + stableStringify_(value[key])).join(',') + '}';
-}
-
 function extractText_(resp) {
   if (!resp?.output) return '';
   const chunks = [];
