@@ -61,7 +61,7 @@ function doPost(e) {
     if (lock) {
       try {
         lock.releaseLock();
-      } catch (_) {}
+      } catch (_) { }
     }
   }
 }

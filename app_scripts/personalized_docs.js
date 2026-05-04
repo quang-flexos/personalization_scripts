@@ -15,6 +15,11 @@ var PERSONALIZED_DOC_CFG = Object.freeze({
     'Catawiki SLT': '1HgYNoMBvFhPi5ix2QZILLIH-OFJcFWMcw4mnBK1esvI',
     'Supercell SLT': '1HgYNoMBvFhPi5ix2QZILLIH-OFJcFWMcw4mnBK1esvI',
   }),
+  OPTIONAL_PREFLIGHT_HEADERS_BY_SHEET: Object.freeze({
+    'Catawiki SLT': Object.freeze(['COMPANY', 'ROLE']),
+    'Supercell SLT': Object.freeze(['COMPANY', 'ROLE']),
+    'Serwiz': Object.freeze(['COMPANY', 'ROLE']),
+  }),
   PARENT_FOLDER_ID: '1iBAZAAw8Q6AmDS_MU-y3-v2vRC_IHhu3',
   DOC_URL_HEADER: 'DOC_URL',
   PDF_URL_HEADER: 'PDF_URL',
@@ -327,7 +332,8 @@ function pdRunPdfSync_(sheet, rows) {
 function pdLoadRunContext_(sheet, includeTemplate) {
   const values = sheet.getDataRange().getValues();
   const headers = values[0].map(pdNormalizeHeader_);
-  const context = { sheet, values, headers };
+  const optionalPreflightHeaders = pdGetOptionalPreflightHeadersForSheet_(sheet);
+  const context = { sheet, values, headers, optionalPreflightHeaders };
 
   if (!includeTemplate) {
     return context;
@@ -359,6 +365,22 @@ function pdGetTemplateDocIdForSheet_(sheet) {
   return PERSONALIZED_DOC_CFG.DEFAULT_TEMPLATE_DOC_ID;
 }
 
+function pdGetOptionalPreflightHeadersForSheet_(sheet) {
+  const sheetName = String(sheet?.getName() || '').trim();
+  const headerNames = PERSONALIZED_DOC_CFG.OPTIONAL_PREFLIGHT_HEADERS_BY_SHEET[sheetName] || [];
+
+  return new Set(headerNames.map(pdNormalizeKey_));
+}
+
+function pdIsOptionalPreflightHeader_(context, headerName) {
+  const optionalHeaders = context?.optionalPreflightHeaders;
+  if (!optionalHeaders || !optionalHeaders.size) {
+    return false;
+  }
+
+  return optionalHeaders.has(pdNormalizeKey_(headerName));
+}
+
 function pdEvaluateRowReadiness_(context, row) {
   const blockers = new Set();
   const headers = context.headers;
@@ -374,6 +396,10 @@ function pdEvaluateRowReadiness_(context, row) {
   }
 
   for (const headerName of PERSONALIZED_DOC_CFG.REQUIRED_PROFILE_HEADERS) {
+    if (pdIsOptionalPreflightHeader_(context, headerName)) {
+      continue;
+    }
+
     const value = pdGetHeaderValue_(headers, row, headerName);
     if (!value) {
       blockers.add(headerName);
@@ -381,10 +407,18 @@ function pdEvaluateRowReadiness_(context, row) {
   }
 
   for (const missingHeader of context.templateMissingHeaders || []) {
+    if (pdIsOptionalPreflightHeader_(context, missingHeader)) {
+      continue;
+    }
+
     blockers.add(missingHeader);
   }
 
   for (const placeholder of context.templatePlaceholders || []) {
+    if (pdIsOptionalPreflightHeader_(context, placeholder)) {
+      continue;
+    }
+
     const value = pdGetValueForPlaceholder_(headers, row, placeholder);
     if (value) {
       continue;
