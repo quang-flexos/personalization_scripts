@@ -300,7 +300,7 @@ Output:
 ## Human Workflow For Metadata
 
 1. Make sure transcripts are present in the personalized sheet.
-2. Run `Generate BLUEPRINT` for missing rows. This starts the async intake pipeline: Batch API generation, result import, metadata backfill, and industry normalization.
+2. Run `Generate BLUEPRINT` for missing rows. This starts the async intake pipeline: Batch API generation for `BLUEPRINT`, `ROLE`, `COMPANY`, `INDUSTRY`, and `COURSE_GOAL`, result import, metadata backfill, and industry normalization.
 3. Wait for the pipeline trigger to finish. Use the hidden usage/cache sheets only for troubleshooting.
 4. Manually resolve any remaining ambiguous rows.
 5. If needed, do web research for high-confidence metadata only.
@@ -328,7 +328,7 @@ Delivery scope is `complete only`.
 That means a learner is delivered only when all of these are true:
 
 - transcript exists
-- `BLUEPRINT`, `ROLE`, `COMPANY`, `INDUSTRY` are resolved
+- `BLUEPRINT`, `ROLE`, `COMPANY`, `INDUSTRY`, `COURSE_GOAL` are resolved
 - required `COURSE_*` outputs are populated
 - doc builds successfully
 - PDF builds successfully
@@ -339,15 +339,14 @@ That means a learner is delivered only when all of these are true:
 **OpenAI**
 
 - generate personalized `COURSE_*` content
-- create an async OpenAI Batch API job for selected missing `COURSE_*` content
-- check and import the latest OpenAI Batch API job results
+- run selected missing `COURSE_*` content through an async OpenAI Batch API job under the existing generate menu items
 - hidden `_OPENAI_CACHE`, `_OPENAI_USAGE`, and `_OPENAI_BATCH_ITEMS` sheets are created automatically when needed
 - hidden OpenAI sheets are append-only by default to avoid spreadsheet timeout errors on large documents
 
 **Intake**
 
 - generate `BLUEPRINT`
-- generate `BLUEPRINT`, `ROLE`, `COMPANY`, and `INDUSTRY` through one async OpenAI Batch API job
+- generate `BLUEPRINT`, `ROLE`, `COMPANY`, `INDUSTRY`, and `COURSE_GOAL` through one async OpenAI Batch API job
 - continue the intake pipeline automatically after the batch completes: import results, backfill remaining metadata, normalize `INDUSTRY`
 - backfill `ROLE`, `COMPANY`, `INDUSTRY` from enrichment
 
@@ -378,7 +377,7 @@ Keep the local source in `.js`. `clasp` will sync that source into Apps Script.
 - `[[...]]` support currently exists only in row `2` template cells for generated `COURSE_*` content.
 - `{{ ... }}` replacement in the learner-facing guide still expects exact matching live sheet headers.
 - OpenAI Batch API import writes only blank target cells, so existing reviewed content is not overwritten.
-- OpenAI Batch API completion is async; use `Check latest batch` before `Import latest batch results`.
+- OpenAI Batch API completion is async; the generate menu items install a time trigger that imports results after completion.
 
 ## Quick Troubleshooting
 

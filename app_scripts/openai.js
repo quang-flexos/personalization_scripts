@@ -28,6 +28,8 @@ const OPENAI_CFG = {
   LATEST_BATCH_ID_PROPERTY: 'OPENAI_LATEST_BATCH_ID',
   INTAKE_PIPELINE_STATE_PROPERTY: 'OPENAI_INTAKE_PIPELINE_STATE',
   INTAKE_PIPELINE_TRIGGER_FUNCTION: 'continueIntakeBatchPipeline',
+  COURSE_PIPELINE_STATE_PROPERTY: 'OPENAI_COURSE_PIPELINE_STATE',
+  COURSE_PIPELINE_TRIGGER_FUNCTION: 'continueCourseBatchPipeline',
 };
 
 // =========================
@@ -51,6 +53,7 @@ const INTAKE_OUTPUT_HEADERS = {
   ROLE: 'ROLE',
   COMPANY: 'COMPANY',
   INDUSTRY: 'INDUSTRY',
+  COURSE_GOAL: 'COURSE_GOAL',
 };
 
 const ENRICHMENT_BACKFILL_CFG = {
@@ -103,6 +106,7 @@ Reference: the transcript only.
 
 Task:
 - Extract ROLE, COMPANY, and INDUSTRY from the intake transcript when clearly stated.
+- Extract COURSE_GOAL as the learner's clearest 90-day learning/business outcome when clearly stated.
 
 Rules:
 - Transcript is the only source of truth.
@@ -119,6 +123,8 @@ Extraction rules for structured fields:
 - Prefer a clean market label such as "Technology", "Real Estate", "Higher Education", or "Food & Facility Management Services".
 - If multiple are mentioned, prefer the clearest current one.
 - If a field is missing or unclear, return an empty string.
+- COURSE_GOAL should be one concise sentence using the learner's words where possible.
+- COURSE_GOAL should not include unsupported numbers, outcomes, or AI use cases.
 - Do not infer from adjacent context, client work, product descriptions, domain knowledge, or likely business type.
 - Do not turn a business description into a company name.
 - Do not return long multi-part descriptions such as "think tank, executive education, and corporate advisory services".
@@ -134,7 +140,7 @@ Normalization (only when clearly intended):
 - Preserve user-corrected spellings (e.g., "in beta, i n b e t a").
 
 Output:
-Return ONLY strict JSON: {"role":"...","company":"...","industry":"..."} (no other keys, no markdown, no commentary).`.trim();
+Return ONLY strict JSON: {"role":"...","company":"...","industry":"...","course_goal":"..."} (no other keys, no markdown, no commentary).`.trim();
 
 const EXEC_PROFILE_TEMPLATE = `Name: [Full name]
 Role: [Job title(s)]
@@ -290,8 +296,8 @@ function openaiGenerateSelectedRowsSelectedCourseCols() {
   const cols = getSelectedCourseColsFromRanges_(ranges, lastCol, headers, OPENAI_CFG.COURSE_PREFIX);
   if (!cols.length) return ui.alert('No COURSE_ columns in selection.');
 
-  const result = runOpenAIGenerator_(sh, headers, data, rows, cols);
-  ui.alert(`Done. Wrote: ${result.writes}, Skipped: ${result.skipped}, Errors: ${result.errors}`);
+  const result = startCourseBatchPipeline_(sh, headers, data, rows, cols, 'selected_rows_selected_cols');
+  ui.alert(formatCoursePipelineStartMessage_(result));
 }
 
 function openaiGenerateSelectedRowsAllCourseCols() {
@@ -314,8 +320,8 @@ function openaiGenerateSelectedRowsAllCourseCols() {
   const cols = getAllCourseCols_(headers, OPENAI_CFG.COURSE_PREFIX);
   if (!cols.length) return ui.alert('No COURSE_ columns found.');
 
-  const result = runOpenAIGenerator_(sh, headers, data, rows, cols);
-  ui.alert(`Done. Wrote: ${result.writes}, Skipped: ${result.skipped}, Errors: ${result.errors}`);
+  const result = startCourseBatchPipeline_(sh, headers, data, rows, cols, 'selected_rows_all_cols');
+  ui.alert(formatCoursePipelineStartMessage_(result));
 }
 
 function openaiCreateBatchSelectedRowsSelectedCourseCols() {
@@ -389,6 +395,45 @@ function openaiImportLatestBatchResults() {
       `Errors: ${result.errors}`,
     ].join('\n'),
   );
+}
+
+function continueCourseBatchPipeline() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+
+  try {
+    const state = getCoursePipelineState_();
+    if (!state?.batchId) {
+      cleanupCoursePipeline_();
+      return;
+    }
+
+    const batch = retrieveOpenAIBatch_(state.batchId);
+    if (batch.status !== 'completed') {
+      if (isTerminalFailedBatchStatus_(batch.status)) {
+        cleanupCoursePipeline_();
+        throw new Error(`OpenAI course pipeline batch ${state.batchId} ended with status ${batch.status}`);
+      }
+      return;
+    }
+
+    const spreadsheet = SpreadsheetApp.openById(state.spreadsheetId);
+    const sh = getSheetByStoredId_(spreadsheet, state.sheetId, state.sheetName);
+    if (!sh) {
+      cleanupCoursePipeline_();
+      throw new Error('Course pipeline sheet no longer exists');
+    }
+
+    const importResult = importOpenAIBatchResults_(sh, state.batchId);
+    cleanupCoursePipeline_();
+    Logger.log(JSON.stringify({
+      message: 'OpenAI course pipeline completed',
+      batchId: state.batchId,
+      importResult,
+    }));
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function createIntakeBlueprintBatchSelectedRows() {
@@ -570,6 +615,49 @@ function callOpenAI_(blueprint, course_instruction, options) {
   saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL_LABEL, output, json?.id);
   cache[cacheKey] = { value: output };
   return output;
+}
+
+function startCourseBatchPipeline_(sh, headers, data, rows, cols, mode) {
+  const result = createOpenAICourseBatch_(sh, headers, data, rows, cols);
+  if (!result.batch) {
+    return {
+      started: false,
+      mode,
+      batchResult: result,
+    };
+  }
+
+  const state = buildBatchPipelineState_(sh, rows.slice(0, OPENAI_CFG.MAX_ROWS_PER_RUN), result.batch.id, mode);
+  saveCoursePipelineState_(state);
+  scheduleCoursePipelineTrigger_();
+
+  return {
+    started: true,
+    mode,
+    batchResult: result,
+  };
+}
+
+function formatCoursePipelineStartMessage_(result) {
+  const batchResult = result.batchResult || {};
+  if (!result.started) {
+    return [
+      'No OpenAI batch was needed.',
+      `Direct writes: ${batchResult.directWrites || 0}`,
+      `Cache writes: ${batchResult.cacheWrites || 0}`,
+      `Skipped: ${batchResult.skipped || 0}`,
+    ].join('\n');
+  }
+
+  return [
+    `Course generation batch started: ${batchResult.batch.id}`,
+    `Queued OpenAI requests: ${batchResult.queued}`,
+    `Direct writes: ${batchResult.directWrites || 0}`,
+    `Cache writes: ${batchResult.cacheWrites || 0}`,
+    `Skipped: ${batchResult.skipped || 0}`,
+    '',
+    'You can close the sheet. A trigger will check the batch and import results into the blank COURSE_ cells.',
+  ].join('\n');
 }
 
 function createOpenAICourseBatch_(sh, headers, data, rows, cols) {
@@ -861,6 +949,7 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
   const roleCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.ROLE);
   const companyCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COMPANY);
   const industryCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+  const courseGoalCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COURSE_GOAL);
 
   if (tCol === -1) throw new Error('Missing TRANSCRIPT header');
 
@@ -874,6 +963,7 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
   const roles = sh.getRange(3, roleCol + 1, rowCount, 1).getValues();
   const companies = sh.getRange(3, companyCol + 1, rowCount, 1).getValues();
   const industries = sh.getRange(3, industryCol + 1, rowCount, 1).getValues();
+  const courseGoals = sh.getRange(3, courseGoalCol + 1, rowCount, 1).getValues();
   const cache = loadOpenAICacheMap_();
   const requests = [];
   let cacheWrites = 0;
@@ -911,7 +1001,8 @@ function createOpenAIIntakeBlueprintBatchFromSheet_(sh, rows) {
     const existingRole = String(roles[offset]?.[0] || '').trim();
     const existingCompany = String(companies[offset]?.[0] || '').trim();
     const existingIndustry = String(industries[offset]?.[0] || '').trim();
-    if (existingRole && existingCompany && existingIndustry) {
+    const existingCourseGoal = String(courseGoals[offset]?.[0] || '').trim();
+    if (existingRole && existingCompany && existingIndustry && existingCourseGoal) {
       skipped++;
       continue;
     }
@@ -995,6 +1086,7 @@ function parseBatchIntakeFieldsOutput_(output) {
     role: normalizeExtractedFieldValue_(obj.role),
     company: normalizeExtractedFieldValue_(obj.company),
     industry: normalizeIndustryValue_(obj.industry),
+    course_goal: normalizeCourseGoalValue_(obj.course_goal),
   };
 }
 
@@ -1004,14 +1096,25 @@ function writeBatchIntakeFields_(sh, rowNumber, fields) {
   const roleCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.ROLE);
   const companyCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COMPANY);
   const industryCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+  const courseGoalCol = ensureColumn_(sh, headers, INTAKE_OUTPUT_HEADERS.COURSE_GOAL);
   const row = sh.getRange(rowNumber, 1, 1, sh.getLastColumn()).getValues()[0];
   let writes = 0;
 
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, roleCol, normalizeExtractedFieldValue_(fields.role));
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, companyCol, normalizeExtractedFieldValue_(fields.company));
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, industryCol, normalizeIndustryValue_(fields.industry));
+  writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, courseGoalCol, normalizeCourseGoalValue_(fields.course_goal));
 
   return writes;
+}
+
+function normalizeCourseGoalValue_(value) {
+  const clean = normalizeExtractedFieldValue_(value);
+  if (!clean) return '';
+
+  return clean
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function getOpenAIBatchTaskModel_(task) {
@@ -1101,6 +1204,10 @@ function formatIntakePipelineStartMessage_(result) {
 }
 
 function buildIntakePipelineState_(sh, rows, batchId, mode) {
+  return buildBatchPipelineState_(sh, rows, batchId, mode);
+}
+
+function buildBatchPipelineState_(sh, rows, batchId, mode) {
   return {
     spreadsheetId: sh.getParent().getId(),
     sheetId: sh.getSheetId(),
@@ -1110,6 +1217,44 @@ function buildIntakePipelineState_(sh, rows, batchId, mode) {
     mode,
     createdAt: new Date().toISOString(),
   };
+}
+
+function saveCoursePipelineState_(state) {
+  PropertiesService.getScriptProperties().setProperty(
+    OPENAI_CFG.COURSE_PIPELINE_STATE_PROPERTY,
+    JSON.stringify(state),
+  );
+}
+
+function getCoursePipelineState_() {
+  const raw = String(
+    PropertiesService.getScriptProperties().getProperty(
+      OPENAI_CFG.COURSE_PIPELINE_STATE_PROPERTY,
+    ) || '',
+  ).trim();
+  if (!raw) return null;
+  return JSON.parse(raw);
+}
+
+function scheduleCoursePipelineTrigger_() {
+  removeCoursePipelineTriggers_();
+  ScriptApp.newTrigger(OPENAI_CFG.COURSE_PIPELINE_TRIGGER_FUNCTION)
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+}
+
+function cleanupCoursePipeline_() {
+  PropertiesService.getScriptProperties().deleteProperty(OPENAI_CFG.COURSE_PIPELINE_STATE_PROPERTY);
+  removeCoursePipelineTriggers_();
+}
+
+function removeCoursePipelineTriggers_() {
+  for (const trigger of ScriptApp.getProjectTriggers()) {
+    if (trigger.getHandlerFunction() === OPENAI_CFG.COURSE_PIPELINE_TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
 }
 
 function saveIntakePipelineState_(state) {
@@ -1392,6 +1537,7 @@ function runEnrichmentBackfill_(sh, data, rows) {
   const roleCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.ROLE);
   const companyCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.COMPANY);
   const industryCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+  const courseGoalCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.COURSE_GOAL);
 
   if (emailCol === -1) {
     throw new Error('Missing EMAIL header');
@@ -1425,10 +1571,12 @@ function runEnrichmentBackfill_(sh, data, rows) {
         roleCol,
         companyCol,
         industryCol,
+        courseGoalCol,
       }, {
         role: match.role,
         company: match.company,
         industry: match.industry,
+        course_goal: '',
       });
 
       if (!writeCount) {
@@ -1493,14 +1641,15 @@ function runIntakeFields_(sh, data, rows) {
   const roleCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.ROLE);
   const companyCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.COMPANY);
   const industryCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+  const courseGoalCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.COURSE_GOAL);
 
   if (tCol === -1) throw new Error('Missing TRANSCRIPT header');
 
-  if (roleCol === -1 && companyCol === -1 && industryCol === -1) {
+  if (roleCol === -1 && companyCol === -1 && industryCol === -1 && courseGoalCol === -1) {
     return { writes: 0, skipped: rows.length, errors: 0 };
   }
 
-  const errorCol = firstExistingColumn_(roleCol, companyCol, industryCol);
+  const errorCol = firstExistingColumn_(roleCol, companyCol, industryCol, courseGoalCol);
 
   let writes = 0;
   let skipped = 0;
@@ -1517,8 +1666,9 @@ function runIntakeFields_(sh, data, rows) {
     const existingRole = String(row[roleCol] || '').trim();
     const existingCompany = String(row[companyCol] || '').trim();
     const existingIndustry = String(row[industryCol] || '').trim();
+    const existingCourseGoal = String(row[courseGoalCol] || '').trim();
 
-    if (existingRole && existingCompany && existingIndustry) {
+    if (existingRole && existingCompany && existingIndustry && existingCourseGoal) {
       skipped++;
       continue;
     }
@@ -1529,6 +1679,7 @@ function runIntakeFields_(sh, data, rows) {
         roleCol,
         companyCol,
         industryCol,
+        courseGoalCol,
       }, fields);
 
       if (!writeCount) {
@@ -1554,6 +1705,7 @@ function writeIntakeFields_(sh, data, rowNumber, cols, values) {
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, cols.roleCol, normalizeExtractedFieldValue_(values.role));
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, cols.companyCol, normalizeExtractedFieldValue_(values.company));
   writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, cols.industryCol, normalizeIndustryValue_(values.industry));
+  writes += writeIfBlankIfColumnExists_(sh, row, rowNumber, cols.courseGoalCol, normalizeCourseGoalValue_(values.course_goal));
 
   data[rowNumber - 1] = row;
   return writes;
@@ -1765,6 +1917,7 @@ function callOpenAIIntakeFields_(transcript) {
       role: normalizeExtractedFieldValue_(cached.role),
       company: normalizeExtractedFieldValue_(cached.company),
       industry: normalizeIndustryValue_(cached.industry),
+      course_goal: normalizeCourseGoalValue_(cached.course_goal),
     };
   }
 
@@ -1788,6 +1941,7 @@ function callOpenAIIntakeFields_(transcript) {
     role: normalizeExtractedFieldValue_(obj.role),
     company: normalizeExtractedFieldValue_(obj.company),
     industry: normalizeIndustryValue_(obj.industry),
+    course_goal: normalizeCourseGoalValue_(obj.course_goal),
   };
   saveOpenAICacheValue_(cacheKey, 'intake_fields', INTAKE_CFG.FIELDS_MODEL, JSON.stringify(fields), json?.id);
   cache[cacheKey] = { value: JSON.stringify(fields) };
@@ -1838,7 +1992,7 @@ function buildIntakeFieldsPayload_(transcript) {
   const schema = {
     type: 'object',
     additionalProperties: false,
-    required: ['role', 'company', 'industry'],
+    required: ['role', 'company', 'industry', 'course_goal'],
     properties: {
       role: {
         type: 'string',
@@ -1851,6 +2005,10 @@ function buildIntakeFieldsPayload_(transcript) {
       industry: {
         type: 'string',
         description: 'Current industry or sector only when explicitly stated. Otherwise return an empty string.',
+      },
+      course_goal: {
+        type: 'string',
+        description: 'The clearest 90-day course goal or desired bootcamp outcome only when explicitly stated. Otherwise return an empty string.',
       },
     },
   };
