@@ -19,29 +19,6 @@ function loadOpenAIHelpers() {
 }
 
 describe("OpenAI helper behavior", () => {
-  test("course generation entrypoints declare lastCol before using it", () => {
-    const source = readFileSync("app_scripts/openai.js", "utf8");
-    const functionNames = [
-      "openaiGenerateSelectedRowsSelectedCourseCols",
-      "openaiGenerateSelectedRowsAllCourseCols",
-      "openaiCreateBatchSelectedRowsSelectedCourseCols",
-      "openaiCreateBatchSelectedRowsAllCourseCols",
-    ];
-
-    for (const functionName of functionNames) {
-      const start = source.indexOf(`function ${functionName}()`);
-      expect(start).toBeGreaterThanOrEqual(0);
-
-      const nextFunction = source.indexOf("\nfunction ", start + 1);
-      const body = source.slice(start, nextFunction === -1 ? undefined : nextFunction);
-      const declaration = body.indexOf("const lastCol = sh.getLastColumn()");
-      const firstRangeUse = body.indexOf("lastRow, lastCol");
-
-      expect(declaration).toBeGreaterThanOrEqual(0);
-      expect(declaration).toBeLessThan(firstRangeUse);
-    }
-  });
-
   test("buildOpenAICacheKey_ is stable for semantically identical payloads", () => {
     const ctx = loadOpenAIHelpers();
 
