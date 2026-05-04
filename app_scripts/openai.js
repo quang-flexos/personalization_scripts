@@ -29,7 +29,7 @@ const OPENAI_CFG = {
 // =========================
 // INTAKE CONFIG
 // =========================
-const INTAKE_MODEL = 'gpt-5.4-mini-2026-03-17';
+const INTAKE_MODEL = 'gpt-5.4-nano';
 const INTAKE_API_URL = 'https://api.openai.com/v1/responses';
 
 const INTAKE_CFG = {
