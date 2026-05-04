@@ -346,6 +346,7 @@ That means a learner is delivered only when all of these are true:
 **Intake**
 
 - generate `BLUEPRINT`
+- create an async OpenAI Batch API job for missing `BLUEPRINT` rows
 - backfill `ROLE`, `COMPANY`, `INDUSTRY` from enrichment
 
 **Personalized Docs**

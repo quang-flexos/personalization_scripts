@@ -59,6 +59,24 @@ describe("OpenAI helper behavior", () => {
     });
   });
 
+  test("parseOpenAIBatchCustomId_ supports course and intake blueprint jobs", () => {
+    const ctx = loadOpenAIHelpers();
+
+    expect(ctx.parseOpenAIBatchCustomId_("course:r3:c7:kabc123")).toEqual({
+      task: "course",
+      rowNumber: 3,
+      colNumber: 7,
+      cacheKeyTail: "abc123",
+    });
+    expect(ctx.parseOpenAIBatchCustomId_("intake_blueprint:r12:c5:kdef456")).toEqual({
+      task: "intake_blueprint",
+      rowNumber: 12,
+      colNumber: 5,
+      cacheKeyTail: "def456",
+    });
+    expect(ctx.parseOpenAIBatchCustomId_("bad")).toBeNull();
+  });
+
   test("extractOpenAIUsageRow_ flattens Responses API usage fields", () => {
     const ctx = loadOpenAIHelpers();
     const row = ctx.extractOpenAIUsageRow_("task", "model", "cache-key", "ok", {
@@ -84,5 +102,12 @@ describe("OpenAI helper behavior", () => {
       64,
       5,
     ]);
+  });
+
+  test("normalizeBatchBlueprintOutput_ unwraps structured blueprint JSON", () => {
+    const ctx = loadOpenAIHelpers();
+
+    expect(ctx.normalizeBatchBlueprintOutput_('{"blueprint":"Name: Ada"}')).toBe("Name: Ada");
+    expect(ctx.normalizeBatchBlueprintOutput_("Name: Ada")).toBe("Name: Ada");
   });
 });
