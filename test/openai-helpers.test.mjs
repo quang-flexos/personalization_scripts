@@ -74,12 +74,6 @@ describe("OpenAI helper behavior", () => {
       colNumber: 5,
       cacheKeyTail: "def456",
     });
-    expect(ctx.parseOpenAIBatchCustomId_("intake_fields:r12:c6:kghi789")).toEqual({
-      task: "intake_fields",
-      rowNumber: 12,
-      colNumber: 6,
-      cacheKeyTail: "ghi789",
-    });
     expect(ctx.parseOpenAIBatchCustomId_("bad")).toBeNull();
   });
 
@@ -115,16 +109,6 @@ describe("OpenAI helper behavior", () => {
 
     expect(ctx.normalizeBatchBlueprintOutput_('{"blueprint":"Name: Ada"}')).toBe("Name: Ada");
     expect(ctx.normalizeBatchBlueprintOutput_("Name: Ada")).toBe("Name: Ada");
-  });
-
-  test("parseBatchIntakeFieldsOutput_ unwraps structured field JSON", () => {
-    const ctx = loadOpenAIHelpers();
-
-    expect(ctx.parseBatchIntakeFieldsOutput_('{"role":"CEO","company":"Acme","industry":"software"}')).toEqual({
-      role: "CEO",
-      company: "Acme",
-      industry: "Technology",
-    });
   });
 
   test("loadOpenAICacheMap_ does not touch sheets when sheet cache reads are disabled", () => {

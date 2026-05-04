@@ -300,8 +300,8 @@ Output:
 ## Human Workflow For Metadata
 
 1. Make sure transcripts are present in the personalized sheet.
-2. Run `Generate BLUEPRINT` for missing rows. This starts the async intake pipeline: Batch API generation, result import, metadata backfill, and industry normalization.
-3. Wait for the pipeline trigger to finish. Use the hidden usage/cache sheets only for troubleshooting.
+2. Run `Generate BLUEPRINT` for missing rows.
+3. Run `Backfill ROLE/COMPANY/INDUSTRY` from enrichment.
 4. Manually resolve any remaining ambiguous rows.
 5. If needed, do web research for high-confidence metadata only.
 
@@ -347,8 +347,7 @@ That means a learner is delivered only when all of these are true:
 **Intake**
 
 - generate `BLUEPRINT`
-- generate `BLUEPRINT`, `ROLE`, `COMPANY`, and `INDUSTRY` through one async OpenAI Batch API job
-- continue the intake pipeline automatically after the batch completes: import results, backfill remaining metadata, normalize `INDUSTRY`
+- create an async OpenAI Batch API job for missing `BLUEPRINT` rows
 - backfill `ROLE`, `COMPANY`, `INDUSTRY` from enrichment
 
 **Personalized Docs**
