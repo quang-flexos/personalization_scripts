@@ -88,6 +88,14 @@ describe("OpenAI helper behavior", () => {
     });
   });
 
+  test("buildCoursePayload_ includes an explicit batch-compatible model", () => {
+    const ctx = loadOpenAIHelpers();
+    const payload = ctx.buildCoursePayload_("blueprint", "instruction");
+
+    expect(payload.model).toBe("gpt-5.4-nano");
+    expect(payload.prompt.id).toMatch(/^pmpt_/);
+  });
+
   test("parseOpenAIBatchCustomId_ supports course and intake blueprint jobs", () => {
     const ctx = loadOpenAIHelpers();
 

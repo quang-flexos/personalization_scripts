@@ -17,6 +17,7 @@ const OPENAI_CFG = {
   STORE: false,
   REASONING_SUMMARY: 'auto',
   COURSE_PREFIX: 'COURSE_',
+  COURSE_MODEL: 'gpt-5.4-nano',
   COURSE_MODEL_LABEL: `prompt:${OPENAI_PROMPT_ID}`,
   PROMPT_CACHE_KEY: 'personalized-course-v1',
   PROMPT_CACHE_RETENTION: 'in_memory',
@@ -412,7 +413,7 @@ function continueCourseBatchPipeline() {
     if (batch.status !== 'completed') {
       if (isTerminalFailedBatchStatus_(batch.status)) {
         cleanupCoursePipeline_();
-        throw new Error(`OpenAI course pipeline batch ${state.batchId} ended with status ${batch.status}`);
+        throw new Error(getOpenAIBatchFailureMessage_(batch, 'course pipeline'));
       }
       return;
     }
@@ -481,7 +482,7 @@ function continueIntakeBatchPipeline() {
     if (batch.status !== 'completed') {
       if (isTerminalFailedBatchStatus_(batch.status)) {
         cleanupIntakePipeline_();
-        throw new Error(`OpenAI intake pipeline batch ${state.batchId} ended with status ${batch.status}`);
+        throw new Error(getOpenAIBatchFailureMessage_(batch, 'intake pipeline'));
       }
       return;
     }
@@ -585,6 +586,7 @@ function runOpenAIGenerator_(sh, headers, data, rows, cols) {
 
 function buildCoursePayload_(blueprint, course_instruction) {
   return {
+    model: OPENAI_CFG.COURSE_MODEL,
     prompt: {
       id: OPENAI_PROMPT_ID,
       variables: { blueprint, course_instruction },
@@ -608,11 +610,11 @@ function callOpenAI_(blueprint, course_instruction, options) {
 
   const json = fetchOpenAIJson_(OPENAI_CFG.API_URL, payload, {
     task: 'course',
-    model: OPENAI_CFG.COURSE_MODEL_LABEL,
+    model: OPENAI_CFG.COURSE_MODEL,
     cacheKey,
   });
   const output = extractText_(json);
-  saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL_LABEL, output, json?.id);
+  saveOpenAICacheValue_(cacheKey, 'course', OPENAI_CFG.COURSE_MODEL, output, json?.id);
   cache[cacheKey] = { value: output };
   return output;
 }
@@ -1120,7 +1122,7 @@ function normalizeCourseGoalValue_(value) {
 function getOpenAIBatchTaskModel_(task) {
   if (task === 'intake_blueprint') return INTAKE_CFG.BLUEPRINT_MODEL;
   if (task === 'intake_fields') return INTAKE_CFG.FIELDS_MODEL;
-  return OPENAI_CFG.COURSE_MODEL_LABEL;
+  return OPENAI_CFG.COURSE_MODEL;
 }
 
 // =========================
@@ -2238,7 +2240,7 @@ function createOpenAIBatch_(inputFileId, metadata) {
 
   return fetchOpenAIJson_(OPENAI_CFG.BATCH_API_URL, payload, {
     task: 'batch_create',
-    model: OPENAI_CFG.COURSE_MODEL_LABEL,
+    model: metadata?.task === 'intake_blueprint' ? INTAKE_CFG.BLUEPRINT_MODEL : OPENAI_CFG.COURSE_MODEL,
     cacheKey: '',
   });
 }
@@ -2257,6 +2259,27 @@ function retrieveOpenAIBatch_(batchId) {
   }
 
   return json;
+}
+
+function getOpenAIBatchFailureMessage_(batch, label) {
+  const parts = [
+    `OpenAI ${label || 'batch'} batch ${batch.id} ended with status ${batch.status}`,
+  ];
+
+  if (batch.errors) {
+    parts.push('errors=' + JSON.stringify(batch.errors).slice(0, 1000));
+  }
+
+  if (batch.error_file_id) {
+    try {
+      const rows = downloadOpenAIBatchOutputRows_(batch.error_file_id);
+      parts.push('error_file=' + JSON.stringify(rows).slice(0, 1500));
+    } catch (e) {
+      parts.push('error_file_download_failed=' + e.message);
+    }
+  }
+
+  return parts.join(' | ');
 }
 
 function downloadOpenAIBatchOutputRows_(fileId) {
