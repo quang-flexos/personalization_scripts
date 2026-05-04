@@ -349,7 +349,8 @@ function pdRunPlaceholderPdfSync_(sheet, rows, blockerMessages) {
     return pdBuildEmptyPlaceholderSyncResult_();
   }
 
-  const context = pdLoadRunContext_(sheet, false);
+  const context = pdLoadRunContext_(sheet, true);
+  const docUrlCol = pdEnsureOutputColumn_(sheet, context.headers, PERSONALIZED_DOC_CFG.DOC_URL_HEADER);
   const pdfUrlCol = pdEnsureOutputColumn_(sheet, context.headers, PERSONALIZED_DOC_CFG.PDF_URL_HEADER);
   const statusCol = pdEnsureOutputColumn_(sheet, context.headers, PERSONALIZED_DOC_CFG.DELIVERY_STATUS_HEADER);
   const kitFieldKey = pdEnsureKitCustomFieldKey_(PERSONALIZED_DOC_CFG.KIT_FIELD_LABEL);
@@ -375,17 +376,18 @@ function pdRunPlaceholderPdfSync_(sheet, rows, blockerMessages) {
     try {
       let pdfUrl = pdGetHeaderValue_(context.headers, row, PERSONALIZED_DOC_CFG.PDF_URL_HEADER);
       const existingPdfFile = pdGetDriveFileIfAccessible_(pdTryExtractDriveFileIdFromUrl_(pdfUrl));
+      const docResult = pdUpsertLearnerDoc_(context, row, folder);
+      const pdfResult = pdUpsertLearnerPdf_(context.headers, row, docResult, folder);
 
       if (existingPdfFile) {
-        pdfUrl = existingPdfFile.getUrl();
         placeholdersReused++;
       } else {
-        const placeholderFile = pdCreatePlaceholderPdfFile_(folder, context.headers, row, email);
-        pdfUrl = placeholderFile.getUrl();
-        sheet.getRange(rowNumber, pdfUrlCol + 1).setValue(pdfUrl).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
         placeholdersCreated++;
       }
 
+      pdfUrl = pdfResult.url;
+      sheet.getRange(rowNumber, docUrlCol + 1).setValue(docResult.url).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
+      sheet.getRange(rowNumber, pdfUrlCol + 1).setValue(pdfUrl).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
       pdSyncValueToKit_(email, kitFieldKey, pdfUrl);
       pdWriteStatus_(
         sheet,
@@ -812,70 +814,6 @@ function pdBuildDocBuildMessage_(evaluation, warnings) {
   lines.push(uniqueWarnings.join('\n\n'));
 
   return lines.join('\n');
-}
-
-function pdCreatePlaceholderPdfFile_(folder, headers, row, email) {
-  const fileName = pdBuildPlaceholderPdfName_(headers, row, email);
-  return folder.createFile(pdBuildPlaceholderPdfBlob_(fileName));
-}
-
-function pdBuildPlaceholderPdfName_(headers, row, email) {
-  const name = pdGetFirstPresentValue_(headers, row, ['NAME', 'FULL_NAME', 'FIRST_NAME']) || email;
-  return `Personalized AILA Prompt Guide - ${name} - pending.pdf`;
-}
-
-function pdBuildPlaceholderPdfBlob_(fileName) {
-  return Utilities
-    .newBlob(pdBuildPlaceholderPdfContent_(), MimeType.PDF, fileName)
-    .setName(fileName);
-}
-
-function pdBuildPlaceholderPdfContent_() {
-  return pdBuildSimplePdf_([
-    'Your personalized AILA prompt guide is being prepared.',
-    'This link is reserved now and will update automatically when your final PDF is ready.',
-  ]);
-}
-
-function pdBuildSimplePdf_(lines) {
-  const escapedLines = (lines || []).map(line => pdEscapePdfText_(line));
-  const textOps = escapedLines.map((line, index) => {
-    const y = 700 - (index * 24);
-    return `BT /F1 12 Tf 72 ${y} Td (${line}) Tj ET`;
-  }).join('\n');
-  const objects = [
-    '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    `<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`,
-  ];
-  let pdf = '%PDF-1.4\n';
-  const offsets = [0];
-
-  for (let index = 0; index < objects.length; index++) {
-    offsets.push(pdf.length);
-    pdf += `${index + 1} 0 obj\n${objects[index]}\nendobj\n`;
-  }
-
-  const xrefOffset = pdf.length;
-  pdf += `xref\n0 ${objects.length + 1}\n`;
-  pdf += '0000000000 65535 f \n';
-
-  for (let index = 1; index < offsets.length; index++) {
-    pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
-  }
-
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
-  pdf += `startxref\n${xrefOffset}\n%%EOF\n`;
-  return pdf;
-}
-
-function pdEscapePdfText_(text) {
-  return String(text || '')
-    .replace(/\\/g, '\\\\')
-    .replace(/\(/g, '\\(')
-    .replace(/\)/g, '\\)');
 }
 
 function pdGetValueForPlaceholder_(headers, row, placeholder) {

@@ -55,43 +55,49 @@ describe('personalized docs full delivery', () => {
     });
   });
 
-  test('creates and syncs a placeholder PDF URL for a blocked row', () => {
-    const createdFiles = [];
+  test('builds and syncs placeholder URLs through the normal doc and PDF pipeline', () => {
+    const pipelineCalls = [];
     const syncedValues = [];
     const values = [
-      ['EMAIL', 'NAME', 'PDF_URL', 'DELIVERY_STATUS'],
-      ['', '', '', ''],
-      ['blocked@example.com', 'Ada Lovelace', '', 'BLOCKED'],
+      ['EMAIL', 'NAME', 'DOC_URL', 'PDF_URL', 'DELIVERY_STATUS'],
+      ['', '', '', '', ''],
+      ['blocked@example.com', 'Ada Lovelace', '', '', 'BLOCKED'],
     ];
     const context = loadPersonalizedDocs({
-      MimeType: { PDF: 'application/pdf' },
-      Utilities: {
-        newBlob(content, contentType, name) {
-          return {
-            content,
-            contentType,
-            name,
-            setName(nextName) {
-              this.name = nextName;
-              return this;
-            },
-          };
-        },
-      },
       __folder: {
-        createFile(blob) {
-          createdFiles.push(blob);
-          return {
-            getUrl: () => 'https://drive.google.com/file/d/placeholder-id/view',
-          };
-        },
+        getName: () => 'Inbox',
       },
+      __pipelineCalls: pipelineCalls,
       __syncedValues: syncedValues,
     });
     vm.runInContext(`
+      pdLoadRunContext_ = (sheet, includeTemplate) => {
+        __pipelineCalls.push(['context', includeTemplate]);
+        return {
+          values: sheet.getDataRange().getValues(),
+          headers: sheet.getDataRange().getValues()[0],
+          templateFileName: 'Personalized AILA Prompt Guide',
+          templatePlaceholders: ['NAME', 'ROLE'],
+        };
+      };
       pdEnsureKitCustomFieldKey_ = () => 'pdf_url';
       pdEnsureTabFolder_ = () => __folder;
-      pdGetDriveFileIfAccessible_ = () => null;
+      pdUpsertLearnerDoc_ = (context, row, folder) => {
+        __pipelineCalls.push(['doc', row[0], folder.getName()]);
+        return {
+          id: 'doc-id',
+          name: 'Personalized AILA Prompt Guide - Ada Lovelace',
+          mode: 'created',
+          url: 'https://docs.google.com/document/d/doc-id/edit',
+        };
+      };
+      pdUpsertLearnerPdf_ = (headers, row, docResult, folder) => {
+        __pipelineCalls.push(['pdf', docResult.id, folder.getName()]);
+        return {
+          id: 'pdf-id',
+          url: 'https://drive.google.com/file/d/pdf-id/view',
+        };
+      };
       pdSyncValueToKit_ = (email, fieldKey, value) => __syncedValues.push({ email, fieldKey, value });
     `, context);
 
@@ -129,20 +135,23 @@ describe('personalized docs full delivery', () => {
       skipped: 0,
       errors: 0,
     });
-    expect(createdFiles[0].name).toBe('Personalized AILA Prompt Guide - Ada Lovelace - pending.pdf');
-    expect(createdFiles[0].contentType).toBe('application/pdf');
-    expect(createdFiles[0].content.startsWith('%PDF-1.4')).toBe(true);
-    expect(values[2][2]).toBe('https://drive.google.com/file/d/placeholder-id/view');
+    expect(pipelineCalls).toEqual([
+      ['context', true],
+      ['doc', 'blocked@example.com', 'Inbox'],
+      ['pdf', 'doc-id', 'Inbox'],
+    ]);
+    expect(values[2][2]).toBe('https://docs.google.com/document/d/doc-id/edit');
+    expect(values[2][3]).toBe('https://drive.google.com/file/d/pdf-id/view');
     expect(syncedValues).toEqual([
       {
         email: 'blocked@example.com',
         fieldKey: 'pdf_url',
-        value: 'https://drive.google.com/file/d/placeholder-id/view',
+        value: 'https://drive.google.com/file/d/pdf-id/view',
       },
     ]);
     expect(writes).toContainEqual({
       row: 3,
-      col: 4,
+      col: 5,
       type: 'value',
       value: 'PLACEHOLDER_SYNCED',
     });
