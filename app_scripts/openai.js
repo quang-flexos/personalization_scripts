@@ -39,6 +39,20 @@ const ENRICHMENT_BACKFILL_CFG = {
   INDUSTRY_HEADER: 'Industry',
 };
 
+const NOTION_ENRICHMENT_CFG = {
+  API_URL: 'https://api.notion.com/v1',
+  API_KEY_PROPERTY: 'NOTION_API_KEY',
+  DATABASE_ID_PROPERTY: 'NOTION_DATABASE_ID',
+  DATA_SOURCE_ID_PROPERTY: 'NOTION_DATA_SOURCE_ID',
+  DEFAULT_DATABASE_ID: 'd3157a005df24c889a6be339e4b2cefe',
+  VERSION: '2026-03-11',
+  PAGE_SIZE: 100,
+  EMAIL_PROPERTY: 'Email',
+  ROLE_PROPERTY: 'Title',
+  COMPANY_PROPERTY: 'Company',
+  INDUSTRY_PROPERTY: 'Industry',
+};
+
 const INTAKE_BLUEPRINT_SYSTEM_PROMPT = `You are an Executive Intake Synthesizer for an AI Executive Boot Camp.
 Reference: executive-profile-template.md (required headings + order + bullet style).
 
@@ -609,13 +623,37 @@ function runIntakeBlueprint_(sh, data, rows) {
 
 function runIntakeCombined_(sh, data, rows) {
   const blueprintResult = runIntakeBlueprint_(sh, data, rows);
-  const fieldsResult = runIntakeFields_(sh, data, rows);
+  const fieldsResult = runNotionEnrichmentBackfill_(sh, data, rows);
 
   return {
     writes: blueprintResult.writes + fieldsResult.writes,
     skipped: blueprintResult.skipped + fieldsResult.skipped,
     errors: blueprintResult.errors + fieldsResult.errors,
   };
+}
+
+function runNotionEnrichmentBackfill_(sh, data, rows) {
+  const headers = data[0].map(normalizeHeader_);
+  const emailCol = findColumn_(headers, CFG.EMAIL_HEADER);
+  const roleCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.ROLE);
+  const companyCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.COMPANY);
+  const industryCol = findColumn_(headers, INTAKE_OUTPUT_HEADERS.INDUSTRY);
+
+  if (emailCol === -1) {
+    throw new Error('Missing EMAIL header');
+  }
+
+  if (roleCol === -1 && companyCol === -1 && industryCol === -1) {
+    return { writes: 0, skipped: rows.length, errors: 0 };
+  }
+
+  const lookup = loadNotionEnrichmentLookup_();
+  return writeEnrichmentBackfill_(sh, data, rows, lookup, {
+    emailCol,
+    roleCol,
+    companyCol,
+    industryCol,
+  });
 }
 
 function runEnrichmentBackfill_(sh, data, rows) {
@@ -633,14 +671,23 @@ function runEnrichmentBackfill_(sh, data, rows) {
     return { writes: 0, skipped: rows.length, errors: 0 };
   }
 
-  const lookup = loadEnrichmentLookup_();
+  const lookup = loadNotionEnrichmentLookup_();
+  return writeEnrichmentBackfill_(sh, data, rows, lookup, {
+    emailCol,
+    roleCol,
+    companyCol,
+    industryCol,
+  });
+}
+
+function writeEnrichmentBackfill_(sh, data, rows, lookup, cols) {
   let writes = 0;
   let skipped = 0;
   let errors = 0;
 
   for (const r of rows) {
     const row = data[r - 1] || [];
-    const email = String(row[emailCol] || '').trim().toLowerCase();
+    const email = String(row[cols.emailCol] || '').trim().toLowerCase();
     if (!email) {
       skipped++;
       continue;
@@ -654,9 +701,9 @@ function runEnrichmentBackfill_(sh, data, rows) {
 
     try {
       const writeCount = writeIntakeFields_(sh, data, r, {
-        roleCol,
-        companyCol,
-        industryCol,
+        roleCol: cols.roleCol,
+        companyCol: cols.companyCol,
+        industryCol: cols.industryCol,
       }, {
         role: match.role,
         company: match.company,
@@ -670,7 +717,7 @@ function runEnrichmentBackfill_(sh, data, rows) {
 
       writes++;
     } catch (e) {
-      const targetCol = firstExistingColumn_(roleCol, companyCol, industryCol, emailCol);
+      const targetCol = firstExistingColumn_(cols.roleCol, cols.companyCol, cols.industryCol, cols.emailCol);
       sh.getRange(r, targetCol + 1).setValue('ERROR: ' + e.message);
       errors++;
     }
@@ -1176,6 +1223,203 @@ function loadEnrichmentLookup_() {
   }
 
   return lookup;
+}
+
+function loadNotionEnrichmentLookup_() {
+  const databaseId = getNotionDatabaseId_();
+  const dataSourceId = getNotionDataSourceId_(databaseId);
+  const lookup = {};
+  let startCursor = '';
+
+  do {
+    const payload = {
+      page_size: NOTION_ENRICHMENT_CFG.PAGE_SIZE,
+    };
+    if (startCursor) {
+      payload.start_cursor = startCursor;
+    }
+
+    const json = fetchNotionJson_(
+      `${NOTION_ENRICHMENT_CFG.API_URL}/data_sources/${encodeURIComponent(dataSourceId)}/query`,
+      'post',
+      payload,
+    );
+
+    for (const page of json.results || []) {
+      const props = page.properties || {};
+      const email = normalizeNotionPropertyText_(props[NOTION_ENRICHMENT_CFG.EMAIL_PROPERTY]).toLowerCase();
+      if (!email) {
+        continue;
+      }
+
+      const current = lookup[email] || { role: '', company: '', industry: '' };
+      const next = {
+        role: normalizeEnrichmentFieldValue_(
+          normalizeNotionPropertyText_(props[NOTION_ENRICHMENT_CFG.ROLE_PROPERTY]),
+        ),
+        company: normalizeEnrichmentFieldValue_(
+          normalizeNotionPropertyText_(props[NOTION_ENRICHMENT_CFG.COMPANY_PROPERTY]),
+        ),
+        industry: normalizeIndustryValue_(
+          normalizeNotionPropertyText_(props[NOTION_ENRICHMENT_CFG.INDUSTRY_PROPERTY]),
+        ),
+      };
+
+      lookup[email] = {
+        role: current.role || next.role,
+        company: current.company || next.company,
+        industry: current.industry || next.industry,
+      };
+    }
+
+    startCursor = json.has_more ? String(json.next_cursor || '') : '';
+  } while (startCursor);
+
+  return lookup;
+}
+
+function getNotionDatabaseId_() {
+  const fromProperty = String(
+    PropertiesService.getScriptProperties().getProperty(
+      NOTION_ENRICHMENT_CFG.DATABASE_ID_PROPERTY,
+    ) || '',
+  ).trim();
+
+  return normalizeNotionId_(fromProperty || NOTION_ENRICHMENT_CFG.DEFAULT_DATABASE_ID);
+}
+
+function getNotionDataSourceId_(databaseId) {
+  const fromProperty = String(
+    PropertiesService.getScriptProperties().getProperty(
+      NOTION_ENRICHMENT_CFG.DATA_SOURCE_ID_PROPERTY,
+    ) || '',
+  ).trim();
+
+  if (fromProperty) {
+    return normalizeNotionId_(fromProperty);
+  }
+
+  const database = fetchNotionJson_(
+    `${NOTION_ENRICHMENT_CFG.API_URL}/databases/${encodeURIComponent(databaseId)}`,
+    'get',
+  );
+  const dataSourceId = database?.data_sources?.[0]?.id;
+
+  if (!dataSourceId) {
+    throw new Error('Notion database has no accessible data source');
+  }
+
+  return normalizeNotionId_(dataSourceId);
+}
+
+function fetchNotionJson_(url, method, payload) {
+  const options = {
+    method,
+    contentType: 'application/json',
+    headers: {
+      Authorization: `Bearer ${secret_(NOTION_ENRICHMENT_CFG.API_KEY_PROPERTY)}`,
+      'Notion-Version': NOTION_ENRICHMENT_CFG.VERSION,
+    },
+    muteHttpExceptions: true,
+  };
+
+  if (payload) {
+    options.payload = JSON.stringify(payload);
+  }
+
+  const res = UrlFetchApp.fetch(url, options);
+  const text = res.getContentText();
+  let json = {};
+  try { json = JSON.parse(text); } catch (_) { }
+
+  if (res.getResponseCode() >= 300) {
+    throw new Error(json?.message || `Notion error ${res.getResponseCode()}`);
+  }
+
+  return json;
+}
+
+function normalizeNotionId_(value) {
+  const clean = String(value || '').trim();
+  if (!clean) return '';
+
+  const uuidMatch = clean.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+  if (uuidMatch) return uuidMatch[0];
+
+  const compactMatch = clean.match(/[0-9a-f]{32}/i);
+  if (compactMatch) return compactMatch[0];
+
+  return clean;
+}
+
+function normalizeNotionPropertyText_(property) {
+  if (!property) return '';
+
+  switch (property.type) {
+    case 'title':
+      return joinNotionRichText_(property.title);
+    case 'rich_text':
+      return joinNotionRichText_(property.rich_text);
+    case 'email':
+      return String(property.email || '').trim();
+    case 'phone_number':
+      return String(property.phone_number || '').trim();
+    case 'url':
+      return String(property.url || '').trim();
+    case 'select':
+      return String(property.select?.name || '').trim();
+    case 'status':
+      return String(property.status?.name || '').trim();
+    case 'multi_select':
+      return (property.multi_select || [])
+        .map(option => String(option?.name || '').trim())
+        .filter(Boolean)
+        .join(', ');
+    case 'formula':
+      return normalizeNotionFormulaText_(property.formula);
+    case 'rollup':
+      return normalizeNotionRollupText_(property.rollup);
+    case 'number':
+      return property.number === null || property.number === undefined
+        ? ''
+        : String(property.number).trim();
+    default:
+      return '';
+  }
+}
+
+function joinNotionRichText_(items) {
+  return (items || [])
+    .map(item => String(item?.plain_text || '').trim())
+    .filter(Boolean)
+    .join(' ')
+    .trim();
+}
+
+function normalizeNotionFormulaText_(formula) {
+  if (!formula) return '';
+
+  if (formula.type === 'string') return String(formula.string || '').trim();
+  if (formula.type === 'number') return formula.number === null || formula.number === undefined ? '' : String(formula.number).trim();
+  if (formula.type === 'boolean') return formula.boolean ? 'true' : 'false';
+  if (formula.type === 'date') return String(formula.date?.start || '').trim();
+
+  return '';
+}
+
+function normalizeNotionRollupText_(rollup) {
+  if (!rollup) return '';
+
+  if (rollup.type === 'array') {
+    return (rollup.array || [])
+      .map(normalizeNotionPropertyText_)
+      .filter(Boolean)
+      .join(', ');
+  }
+  if (rollup.type === 'number') return rollup.number === null || rollup.number === undefined ? '' : String(rollup.number).trim();
+  if (rollup.type === 'date') return String(rollup.date?.start || '').trim();
+
+  return '';
 }
 
 function findEnrichmentHeaderRow_(values) {

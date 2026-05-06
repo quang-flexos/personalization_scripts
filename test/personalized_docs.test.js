@@ -15,6 +15,31 @@ function loadPersonalizedDocs(extraContext = {}) {
   return context;
 }
 
+function loadOpenAi(extraContext = {}) {
+  const context = {
+    console,
+    Logger: { log() {} },
+    Utilities: { sleep() {} },
+    ...extraContext,
+  };
+  vm.createContext(context);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'app_scripts', 'openai.js'), 'utf8');
+  vm.runInContext(source, context);
+  return context;
+}
+
+function loadKit(extraContext = {}) {
+  const context = {
+    console,
+    Logger: { log() {} },
+    ...extraContext,
+  };
+  vm.createContext(context);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'app_scripts', 'kit.js'), 'utf8');
+  vm.runInContext(source, context);
+  return context;
+}
+
 describe('personalized docs full delivery', () => {
   test('syncs placeholder PDF URLs for blocked rows while building ready rows', () => {
     const context = loadPersonalizedDocs({ __calls: [] });
@@ -154,6 +179,139 @@ describe('personalized docs full delivery', () => {
       col: 5,
       type: 'value',
       value: 'PLACEHOLDER_SYNCED',
+    });
+  });
+});
+
+describe('intake generation', () => {
+  test('combined intake generation creates blueprints and backfills Notion enrichment without OpenAI field extraction', () => {
+    const calls = [];
+    const context = loadOpenAi({ __calls: calls });
+    vm.runInContext(`
+      runIntakeBlueprint_ = (sheet, data, rows) => {
+        __calls.push(['blueprint', rows.slice()]);
+        return { writes: 1, skipped: 0, errors: 0 };
+      };
+      runIntakeFields_ = () => {
+        throw new Error('OpenAI field extraction should not run');
+      };
+      runNotionEnrichmentBackfill_ = (sheet, data, rows) => {
+        __calls.push(['notion', rows.slice()]);
+        return { writes: 1, skipped: 1, errors: 0 };
+      };
+    `, context);
+
+    const result = context.runIntakeCombined_('sheet', [['EMAIL']], [3, 4]);
+
+    expect(calls).toEqual([
+      ['blueprint', [3, 4]],
+      ['notion', [3, 4]],
+    ]);
+    expect(result).toEqual({ writes: 2, skipped: 1, errors: 0 });
+  });
+
+  test('intake menu exposes only selected row and all missing row blueprint actions', () => {
+    const menuItems = [];
+    const context = loadKit({
+      SpreadsheetApp: {
+        getUi() {
+          return {
+            createMenu(name) {
+              return {
+                addItem(label, fn) {
+                  if (name === 'Intake') menuItems.push({ label, fn });
+                  return this;
+                },
+                addSeparator() {
+                  if (name === 'Intake') menuItems.push({ separator: true });
+                  return this;
+                },
+                addToUi() {
+                  return this;
+                },
+              };
+            },
+          };
+        },
+      },
+    });
+
+    context.onOpen();
+
+    expect(menuItems).toEqual([
+      {
+        label: 'Generate Blueprint for selected row',
+        fn: 'generateIntakeSelectedRows',
+      },
+      {
+        label: 'Generate Blueprint for all missing rows',
+        fn: 'generateIntakeAllMissing',
+      },
+    ]);
+  });
+
+  test('loads Notion enrichment lookup from database data source pages', () => {
+    const fetches = [];
+    const context = loadOpenAi({
+      secret_(key) {
+        if (key !== 'NOTION_API_KEY') throw new Error(`unexpected secret ${key}`);
+        return 'secret_notion';
+      },
+      PropertiesService: {
+        getScriptProperties() {
+          return {
+            getProperty(key) {
+              return {
+                NOTION_DATABASE_ID: 'd3157a005df24c889a6be339e4b2cefe',
+              }[key] || '';
+            },
+          };
+        },
+      },
+      UrlFetchApp: {
+        fetch(url, options) {
+          fetches.push({ url, options });
+          if (url.includes('/v1/databases/')) {
+            return {
+              getResponseCode: () => 200,
+              getContentText: () => JSON.stringify({
+                data_sources: [{ id: 'data-source-id' }],
+              }),
+            };
+          }
+
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => JSON.stringify({
+              results: [
+                {
+                  properties: {
+                    Email: { type: 'email', email: 'ADA@EXAMPLE.COM' },
+                    Title: { type: 'rich_text', rich_text: [{ plain_text: 'CTO' }] },
+                    Company: { type: 'title', title: [{ plain_text: 'Analytical Engines' }] },
+                    Industry: { type: 'select', select: { name: 'technology' } },
+                  },
+                },
+              ],
+              has_more: false,
+            }),
+          };
+        },
+      },
+    });
+
+    const lookup = context.loadNotionEnrichmentLookup_();
+
+    expect(fetches.map(call => call.url)).toEqual([
+      'https://api.notion.com/v1/databases/d3157a005df24c889a6be339e4b2cefe',
+      'https://api.notion.com/v1/data_sources/data-source-id/query',
+    ]);
+    expect(lookup).toEqual({
+      'ada@example.com': {
+        role: 'CTO',
+        company: 'Analytical Engines',
+        industry: 'Technology',
+      },
     });
   });
 });

@@ -107,26 +107,8 @@ function buildSpreadsheetMenus_() {
 
   addMenuSafely_("Intake", function () {
     ui.createMenu("Intake")
-      .addItem("Generate BLUEPRINT (selected rows)", "generateIntakeSelectedRows")
-      .addItem("Generate BLUEPRINT (ALL missing)", "generateIntakeAllMissing")
-      .addSeparator()
-      .addItem(
-        "Backfill ROLE/COMPANY/INDUSTRY (selected rows)",
-        "backfillIntakeFieldsFromEnrichmentSelectedRows",
-      )
-      .addItem(
-        "Backfill ROLE/COMPANY/INDUSTRY (ALL rows)",
-        "backfillIntakeFieldsFromEnrichmentAllRows",
-      )
-      .addSeparator()
-      .addItem(
-        "Normalize INDUSTRY (selected rows)",
-        "normalizeIndustrySelectedRows",
-      )
-      .addItem(
-        "Normalize INDUSTRY (ALL rows)",
-        "normalizeIndustryAllRows",
-      )
+      .addItem("Generate Blueprint for selected row", "generateIntakeSelectedRows")
+      .addItem("Generate Blueprint for all missing rows", "generateIntakeAllMissing")
       .addToUi();
   });
 

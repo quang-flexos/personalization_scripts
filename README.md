@@ -216,11 +216,12 @@ Set these in the live Apps Script project:
 
 **Required for enrichment backfill**
 
-- `ENRICHMENT_SHEET_ID`
+- `NOTION_API_KEY`
 
 **Optional**
 
-- `ENRICHMENT_SHEET_NAME`
+- `NOTION_DATABASE_ID` defaults to the current intake enrichment table.
+- `NOTION_DATA_SOURCE_ID` skips database lookup and queries that data source directly.
 
 ## Bun + clasp Setup
 
@@ -300,10 +301,9 @@ Output:
 ## Human Workflow For Metadata
 
 1. Make sure transcripts are present in the personalized sheet.
-2. Run `Generate BLUEPRINT` for missing rows.
-3. Run `Backfill ROLE/COMPANY/INDUSTRY` from enrichment.
-4. Manually resolve any remaining ambiguous rows.
-5. If needed, do web research for high-confidence metadata only.
+2. Run `Generate Blueprint for all missing rows`.
+3. Manually resolve any remaining ambiguous rows.
+4. If needed, do web research for high-confidence metadata only.
 
 Never guess missing metadata.
 
@@ -343,7 +343,7 @@ That means a learner is delivered only when all of these are true:
 **Intake**
 
 - generate `BLUEPRINT`
-- backfill `ROLE`, `COMPANY`, `INDUSTRY` from enrichment
+- backfill missing `ROLE`, `COMPANY`, `INDUSTRY` from Notion enrichment
 
 **Personalized Docs**
 
