@@ -287,7 +287,7 @@ describe('intake generation', () => {
                 {
                   properties: {
                     Email: { type: 'email', email: 'ADA@EXAMPLE.COM' },
-                    Title: { type: 'rich_text', rich_text: [{ plain_text: 'CTO' }] },
+                    'Current Role': { type: 'rich_text', rich_text: [{ plain_text: 'CTO' }] },
                     Company: { type: 'title', title: [{ plain_text: 'Analytical Engines' }] },
                     Industry: { type: 'select', select: { name: 'technology' } },
                   },

@@ -48,7 +48,7 @@ const NOTION_ENRICHMENT_CFG = {
   VERSION: '2026-03-11',
   PAGE_SIZE: 100,
   EMAIL_PROPERTY: 'Email',
-  ROLE_PROPERTY: 'Title',
+  ROLE_PROPERTY: 'Current Role',
   COMPANY_PROPERTY: 'Company',
   INDUSTRY_PROPERTY: 'Industry',
 };
