@@ -48,6 +48,7 @@ const NOTION_ENRICHMENT_CFG = {
   VERSION: '2026-03-11',
   PAGE_SIZE: 100,
   EMAIL_PROPERTY: 'Email',
+  NAME_PROPERTIES: ['Full Name', 'Name', 'NAME'],
   ROLE_PROPERTY: 'Current Role',
   COMPANY_PROPERTY: 'Company',
   INDUSTRY_PROPERTY: 'Industry',
@@ -623,12 +624,13 @@ function runIntakeBlueprint_(sh, data, rows) {
 
 function runIntakeCombined_(sh, data, rows) {
   const blueprintResult = runIntakeBlueprint_(sh, data, rows);
-  const fieldsResult = runNotionEnrichmentBackfill_(sh, data, rows);
+  const notionFieldsResult = runNotionEnrichmentBackfill_(sh, data, rows);
+  const transcriptFieldsResult = runIntakeFields_(sh, data, rows);
 
   return {
-    writes: blueprintResult.writes + fieldsResult.writes,
-    skipped: blueprintResult.skipped + fieldsResult.skipped,
-    errors: blueprintResult.errors + fieldsResult.errors,
+    writes: blueprintResult.writes + notionFieldsResult.writes + transcriptFieldsResult.writes,
+    skipped: blueprintResult.skipped + notionFieldsResult.skipped + transcriptFieldsResult.skipped,
+    errors: blueprintResult.errors + notionFieldsResult.errors + transcriptFieldsResult.errors,
   };
 }
 
@@ -1252,8 +1254,11 @@ function loadNotionEnrichmentLookup_() {
         continue;
       }
 
-      const current = lookup[email] || { role: '', company: '', industry: '' };
+      const current = lookup[email] || { name: '', role: '', company: '', industry: '' };
       const next = {
+        name: normalizeEnrichmentFieldValue_(
+          extractNotionProfileName_(props),
+        ),
         role: normalizeEnrichmentFieldValue_(
           normalizeNotionPropertyText_(props[NOTION_ENRICHMENT_CFG.ROLE_PROPERTY]),
         ),
@@ -1266,6 +1271,7 @@ function loadNotionEnrichmentLookup_() {
       };
 
       lookup[email] = {
+        name: current.name || next.name,
         role: current.role || next.role,
         company: current.company || next.company,
         industry: current.industry || next.industry,
@@ -1276,6 +1282,15 @@ function loadNotionEnrichmentLookup_() {
   } while (startCursor);
 
   return lookup;
+}
+
+function extractNotionProfileName_(props) {
+  for (const propertyName of NOTION_ENRICHMENT_CFG.NAME_PROPERTIES) {
+    const value = normalizeNotionPropertyText_(props[propertyName]);
+    if (value) return value;
+  }
+
+  return '';
 }
 
 function getNotionDatabaseId_() {

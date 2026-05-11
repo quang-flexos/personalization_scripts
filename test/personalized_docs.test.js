@@ -28,6 +28,18 @@ function loadOpenAi(extraContext = {}) {
   return context;
 }
 
+function loadS3(extraContext = {}) {
+  const context = {
+    console,
+    Logger: { log() {} },
+    ...extraContext,
+  };
+  vm.createContext(context);
+  const source = fs.readFileSync(path.join(__dirname, '..', 'app_scripts', 's3.js'), 'utf8');
+  vm.runInContext(source, context);
+  return context;
+}
+
 function loadKit(extraContext = {}) {
   const context = {
     console,
@@ -38,6 +50,150 @@ function loadKit(extraContext = {}) {
   const source = fs.readFileSync(path.join(__dirname, '..', 'app_scripts', 'kit.js'), 'utf8');
   vm.runInContext(source, context);
   return context;
+}
+
+function loadKitOpenAiAndNotionSync(extraContext = {}) {
+  const context = {
+    console,
+    Logger: { log() {} },
+    Utilities: { sleep() {} },
+    ...extraContext,
+  };
+  vm.createContext(context);
+  for (const fileName of ['kit.js', 'openai.js', 'notion_sync.js']) {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'app_scripts', fileName), 'utf8');
+    vm.runInContext(source, context);
+  }
+  return context;
+}
+
+function createS3Context({ notionRows = {}, existingSheets = ['Inbox', 'AILA 5'] } = {}) {
+  const sheets = {};
+  const calls = [];
+
+  function createSheet(name, header = ['DATE', 'NAME', 'EMAIL', 'ID', 'TRANSCRIPT']) {
+    const values = [header.slice()];
+    const sheet = {
+      name,
+      values,
+      getName: () => name,
+      getLastColumn: () => values[0].length,
+      getLastRow: () => values.length,
+      getMaxColumns: () => values[0].length,
+      getRange(row, col, numRows = 1, numCols = 1) {
+        return {
+          getValues() {
+            return values
+              .slice(row - 1, row - 1 + numRows)
+              .map(sourceRow => sourceRow.slice(col - 1, col - 1 + numCols));
+          },
+          setValues(nextValues) {
+            for (let r = 0; r < nextValues.length; r++) {
+              const targetRow = row - 1 + r;
+              values[targetRow] = values[targetRow] || [];
+              for (let c = 0; c < nextValues[r].length; c++) {
+                values[targetRow][col - 1 + c] = nextValues[r][c];
+              }
+            }
+            return this;
+          },
+        };
+      },
+      appendRow(row) {
+        values.push(row.slice());
+      },
+    };
+    sheets[name] = sheet;
+    return sheet;
+  }
+
+  for (const name of existingSheets) {
+    createSheet(name);
+  }
+
+  const context = loadS3({
+    __calls: calls,
+    __notionRows: notionRows,
+    LockService: {
+      getScriptLock() {
+        return { waitLock() {}, releaseLock() {} };
+      },
+    },
+    PropertiesService: {
+      getScriptProperties() {
+        return {
+          getProperty(key) {
+            return {
+              APPS_SCRIPT_SECRET: 'secret',
+              NOTION_API_KEY: 'secret_notion',
+              NOTION_DATABASE_ID: 'database-id',
+            }[key] || '';
+          },
+        };
+      },
+    },
+    SpreadsheetApp: {
+      openById() {
+        return {
+          getSpreadsheetTimeZone: () => 'Asia/Ho_Chi_Minh',
+          getSheetByName(name) {
+            return sheets[name] || null;
+          },
+          insertSheet(name) {
+            calls.push(['insertSheet', name]);
+            return createSheet(name, []);
+          },
+        };
+      },
+    },
+    ContentService: {
+      MimeType: { JSON: 'application/json' },
+      createTextOutput(text) {
+        return {
+          text,
+          mimeType: '',
+          setMimeType(mimeType) {
+            this.mimeType = mimeType;
+            return this;
+          },
+        };
+      },
+    },
+    Utilities: {
+      formatDate() {
+        return '2026-05-08 10:00:00';
+      },
+    },
+    UrlFetchApp: {
+      fetch(url) {
+        calls.push(['fetch', url]);
+        if (url.includes('/v1/databases/')) {
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => JSON.stringify({ data_sources: [{ id: 'data-source-id' }] }),
+          };
+        }
+
+        return {
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({
+            results: Object.entries(notionRows).map(([email, cohortCodes]) => ({
+              properties: {
+                Email: { type: 'email', email },
+                'Cohort Codes': {
+                  type: 'multi_select',
+                  multi_select: cohortCodes.map(name => ({ name })),
+                },
+              },
+            })),
+            has_more: false,
+          }),
+        };
+      },
+    },
+  });
+
+  return { context, sheets, calls };
 }
 
 describe('personalized docs full delivery', () => {
@@ -183,8 +339,84 @@ describe('personalized docs full delivery', () => {
   });
 });
 
+describe('transcript intake webhook routing', () => {
+  test('routes private cohort codes to uppercase cohort tabs and creates missing tabs', () => {
+    const { context, sheets, calls } = createS3Context({ existingSheets: ['Inbox', 'AILA 5'] });
+
+    const response = context.doPost({
+      postData: {
+        contents: JSON.stringify({
+          secret: 'secret',
+          completed: true,
+          cohort: 'wolt',
+          uploaded_at: '2026-05-08T03:00:00Z',
+          name: 'Ada',
+          email: 'ada@example.com',
+          transcript: 'hello',
+        }),
+      },
+    });
+
+    expect(JSON.parse(response.text)).toEqual({ ok: true, tab: 'WOLT', row: 2 });
+    expect(calls).toContainEqual(['insertSheet', 'WOLT']);
+    expect(sheets.WOLT.values[0]).toEqual(sheets['AILA 5'].values[0]);
+    expect(sheets.WOLT.values[1][2]).toBe('ada@example.com');
+    expect(sheets.WOLT.values[1][4]).toBe('hello');
+  });
+
+  test('routes null cohort through Notion Cohort Codes to the latest public AILA tab', () => {
+    const { context, sheets } = createS3Context({
+      notionRows: {
+        'ada@example.com': ['AILA #2', 'AILA #5'],
+      },
+    });
+
+    const response = context.doPost({
+      postData: {
+        contents: JSON.stringify({
+          secret: 'secret',
+          completed: true,
+          cohort: null,
+          name: 'Ada',
+          email: 'ada@example.com',
+          transcript: 'hello',
+        }),
+      },
+    });
+
+    expect(JSON.parse(response.text)).toEqual({ ok: true, tab: 'AILA 5', row: 2 });
+    expect(sheets['AILA 5'].values[1][2]).toBe('ada@example.com');
+    expect(sheets.Inbox.values).toHaveLength(1);
+  });
+
+  test('falls back to Inbox when Notion has no cohort match', () => {
+    const { context, sheets } = createS3Context({
+      notionRows: {
+        'other@example.com': ['AILA #5'],
+      },
+    });
+
+    const response = context.doPost({
+      postData: {
+        contents: JSON.stringify({
+          secret: 'secret',
+          completed: true,
+          cohort: '',
+          name: 'Ada',
+          email: 'ada@example.com',
+          transcript: 'hello',
+        }),
+      },
+    });
+
+    expect(JSON.parse(response.text)).toEqual({ ok: true, tab: 'Inbox', row: 2 });
+    expect(sheets.Inbox.values[1][2]).toBe('ada@example.com');
+    expect(sheets['AILA 5'].values).toHaveLength(1);
+  });
+});
+
 describe('intake generation', () => {
-  test('combined intake generation creates blueprints and backfills Notion enrichment without OpenAI field extraction', () => {
+  test('combined intake generation creates blueprints, backfills Notion enrichment, then falls back to transcript fields', () => {
     const calls = [];
     const context = loadOpenAi({ __calls: calls });
     vm.runInContext(`
@@ -192,8 +424,9 @@ describe('intake generation', () => {
         __calls.push(['blueprint', rows.slice()]);
         return { writes: 1, skipped: 0, errors: 0 };
       };
-      runIntakeFields_ = () => {
-        throw new Error('OpenAI field extraction should not run');
+      runIntakeFields_ = (sheet, data, rows) => {
+        __calls.push(['transcript-fields', rows.slice()]);
+        return { writes: 1, skipped: 1, errors: 0 };
       };
       runNotionEnrichmentBackfill_ = (sheet, data, rows) => {
         __calls.push(['notion', rows.slice()]);
@@ -206,8 +439,81 @@ describe('intake generation', () => {
     expect(calls).toEqual([
       ['blueprint', [3, 4]],
       ['notion', [3, 4]],
+      ['transcript-fields', [3, 4]],
     ]);
-    expect(result).toEqual({ writes: 2, skipped: 1, errors: 0 });
+    expect(result).toEqual({ writes: 3, skipped: 2, errors: 0 });
+  });
+
+  test('transcript fallback fills missing intake fields without overwriting Notion enrichment', () => {
+    const writes = [];
+    const fieldCalls = [];
+    const data = [
+      ['EMAIL', 'TRANSCRIPT', 'BLUEPRINT', 'ROLE', 'COMPANY', 'INDUSTRY'],
+      ['', '', '', '', '', ''],
+      ['ada@example.com', 'I am founder of Delta Labs in fintech.', '', '', '', ''],
+      ['grace@example.com', 'I am CEO at Navy Systems.', '', '', '', ''],
+    ];
+    const context = loadKitOpenAiAndNotionSync({
+      __fieldCalls: fieldCalls,
+      __lookup: {
+        'grace@example.com': {
+          role: 'CEO',
+          company: 'Navy Systems',
+          industry: 'technology',
+        },
+      },
+    });
+    vm.runInContext(`
+      runIntakeBlueprint_ = () => ({ writes: 0, skipped: 2, errors: 0 });
+      loadNotionEnrichmentLookup_ = () => __lookup;
+      callOpenAIIntakeFields_ = (transcript) => {
+        __fieldCalls.push(transcript);
+        return {
+          role: 'Founder',
+          company: 'Delta Labs',
+          industry: 'Fintech',
+        };
+      };
+    `, context);
+
+    const sheet = {
+      getRange(row, col) {
+        return {
+          setValue(value) {
+            writes.push({ row, col, value });
+          },
+        };
+      },
+    };
+
+    const result = context.runIntakeCombined_(sheet, data, [3, 4]);
+
+    expect(result).toEqual({ writes: 2, skipped: 4, errors: 0 });
+    expect(fieldCalls).toEqual(['I am founder of Delta Labs in fintech.']);
+    expect(writes).toEqual([
+      { row: 4, col: 4, value: 'CEO' },
+      { row: 4, col: 5, value: 'Navy Systems' },
+      { row: 4, col: 6, value: 'Technology' },
+      { row: 3, col: 4, value: 'Founder' },
+      { row: 3, col: 5, value: 'Delta Labs' },
+      { row: 3, col: 6, value: 'Financial Services' },
+    ]);
+    expect(data[2]).toEqual([
+      'ada@example.com',
+      'I am founder of Delta Labs in fintech.',
+      '',
+      'Founder',
+      'Delta Labs',
+      'Financial Services',
+    ]);
+    expect(data[3]).toEqual([
+      'grace@example.com',
+      'I am CEO at Navy Systems.',
+      '',
+      'CEO',
+      'Navy Systems',
+      'Technology',
+    ]);
   });
 
   test('intake menu exposes only selected row and all missing row blueprint actions', () => {
@@ -308,10 +614,210 @@ describe('intake generation', () => {
     ]);
     expect(lookup).toEqual({
       'ada@example.com': {
+        name: '',
         role: 'CTO',
         company: 'Analytical Engines',
         industry: 'Technology',
       },
     });
+  });
+
+  test('loads full name from explicit Notion name property', () => {
+    const context = loadOpenAi({
+      secret_(key) {
+        if (key !== 'NOTION_API_KEY') throw new Error(`unexpected secret ${key}`);
+        return 'secret_notion';
+      },
+      PropertiesService: {
+        getScriptProperties() {
+          return {
+            getProperty(key) {
+              return { NOTION_DATA_SOURCE_ID: 'data-source-id' }[key] || '';
+            },
+          };
+        },
+      },
+      UrlFetchApp: {
+        fetch(url) {
+          expect(url).toBe('https://api.notion.com/v1/data_sources/data-source-id/query');
+          return {
+            getResponseCode: () => 200,
+            getContentText: () => JSON.stringify({
+              results: [
+                {
+                  properties: {
+                    Email: { type: 'email', email: 'ada@example.com' },
+                    'Full Name': { type: 'rich_text', rich_text: [{ plain_text: 'Ada Lovelace' }] },
+                    'Current Role': { type: 'rich_text', rich_text: [{ plain_text: 'CTO' }] },
+                    Company: { type: 'rich_text', rich_text: [{ plain_text: 'Analytical Engines' }] },
+                    Industry: { type: 'select', select: { name: 'technology' } },
+                  },
+                },
+              ],
+              has_more: false,
+            }),
+          };
+        },
+      },
+    });
+
+    expect(context.loadNotionEnrichmentLookup_()['ada@example.com']).toEqual({
+      name: 'Ada Lovelace',
+      role: 'CTO',
+      company: 'Analytical Engines',
+      industry: 'Technology',
+    });
+  });
+
+  test('Notion Sync menu exposes separate field sync actions', () => {
+    const menuItems = [];
+    const context = loadKit({
+      SpreadsheetApp: {
+        getUi() {
+          return {
+            createMenu(name) {
+              return {
+                addItem(label, fn) {
+                  if (name === 'Notion Sync') menuItems.push({ label, fn });
+                  return this;
+                },
+                addSeparator() {
+                  if (name === 'Notion Sync') menuItems.push({ separator: true });
+                  return this;
+                },
+                addToUi() {
+                  return this;
+                },
+              };
+            },
+          };
+        },
+      },
+    });
+
+    context.onOpen();
+
+    expect(menuItems).toEqual([
+      { label: 'Sync Full Name for selected rows', fn: 'syncNotionNameSelectedRows' },
+      { label: 'Sync Full Name for all rows', fn: 'syncNotionNameAllRows' },
+      { separator: true },
+      { label: 'Sync ROLE for selected rows', fn: 'syncNotionRoleSelectedRows' },
+      { label: 'Sync ROLE for all rows', fn: 'syncNotionRoleAllRows' },
+      { separator: true },
+      { label: 'Sync COMPANY for selected rows', fn: 'syncNotionCompanySelectedRows' },
+      { label: 'Sync COMPANY for all rows', fn: 'syncNotionCompanyAllRows' },
+      { separator: true },
+      { label: 'Sync INDUSTRY for selected rows', fn: 'syncNotionIndustrySelectedRows' },
+      { label: 'Sync INDUSTRY for all rows', fn: 'syncNotionIndustryAllRows' },
+    ]);
+  });
+
+  test('full name sync replaces existing sheet names from Notion', () => {
+    const writes = [];
+    const data = [
+      ['NAME', 'EMAIL', 'ROLE', 'COMPANY', 'INDUSTRY'],
+      ['', '', '', '', ''],
+      ['Ada', 'ada@example.com', '', 'Existing Co', ''],
+      ['Existing Name', 'grace@example.com', '', '', ''],
+      ['', 'missing@example.com', '', '', ''],
+    ];
+    const context = loadKitOpenAiAndNotionSync();
+    vm.runInContext(`
+      loadNotionEnrichmentLookup_ = () => ({
+        'ada@example.com': {
+          name: 'Ada Lovelace',
+          role: 'CTO',
+          company: 'Analytical Engines',
+          industry: 'technology',
+        },
+        'grace@example.com': {
+          name: 'Grace Hopper',
+          role: 'Rear Admiral',
+          company: 'US Navy',
+          industry: 'computing',
+        },
+      });
+    `, context);
+
+    const sheet = {
+      getRange(row, col) {
+        return {
+          setValue(value) {
+            writes.push({ row, col, value });
+          },
+        };
+      },
+    };
+
+    const result = context.runNotionProfileFieldSync_(sheet, data, [3, 4, 5], 'name');
+
+    expect(result).toEqual({ writes: 2, skipped: 1, errors: 0 });
+    expect(writes).toEqual([
+      { row: 3, col: 1, value: 'Ada Lovelace' },
+      { row: 4, col: 1, value: 'Grace Hopper' },
+    ]);
+    expect(data[2]).toEqual(['Ada Lovelace', 'ada@example.com', '', 'Existing Co', '']);
+    expect(data[3]).toEqual(['Grace Hopper', 'grace@example.com', '', '', '']);
+  });
+
+  test('role company and industry sync fill blank cells without overwriting existing values', () => {
+    const writes = [];
+    const data = [
+      ['NAME', 'EMAIL', 'ROLE', 'COMPANY', 'INDUSTRY'],
+      ['', '', '', '', ''],
+      ['Ada', 'ada@example.com', '', 'Existing Co', ''],
+      ['Grace', 'grace@example.com', 'Existing Role', '', 'Existing Industry'],
+    ];
+    const context = loadKitOpenAiAndNotionSync();
+    vm.runInContext(`
+      loadNotionEnrichmentLookup_ = () => ({
+        'ada@example.com': {
+          name: 'Ada Lovelace',
+          role: 'CTO',
+          company: 'Analytical Engines',
+          industry: 'technology',
+        },
+        'grace@example.com': {
+          name: 'Grace Hopper',
+          role: 'Rear Admiral',
+          company: 'US Navy',
+          industry: 'computing',
+        },
+      });
+    `, context);
+
+    const sheet = {
+      getRange(row, col) {
+        return {
+          setValue(value) {
+            writes.push({ row, col, value });
+          },
+        };
+      },
+    };
+
+    expect(context.runNotionProfileFieldSync_(sheet, data, [3, 4], 'role')).toEqual({
+      writes: 1,
+      skipped: 1,
+      errors: 0,
+    });
+    expect(context.runNotionProfileFieldSync_(sheet, data, [3, 4], 'company')).toEqual({
+      writes: 1,
+      skipped: 1,
+      errors: 0,
+    });
+    expect(context.runNotionProfileFieldSync_(sheet, data, [3, 4], 'industry')).toEqual({
+      writes: 1,
+      skipped: 1,
+      errors: 0,
+    });
+
+    expect(writes).toEqual([
+      { row: 3, col: 3, value: 'CTO' },
+      { row: 4, col: 4, value: 'US Navy' },
+      { row: 3, col: 5, value: 'Technology' },
+    ]);
+    expect(data[2]).toEqual(['Ada', 'ada@example.com', 'CTO', 'Existing Co', 'Technology']);
+    expect(data[3]).toEqual(['Grace', 'grace@example.com', 'Existing Role', 'US Navy', 'Existing Industry']);
   });
 });

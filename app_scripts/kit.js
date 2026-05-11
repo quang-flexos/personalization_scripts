@@ -112,6 +112,22 @@ function buildSpreadsheetMenus_() {
       .addToUi();
   });
 
+  addMenuSafely_("Notion Sync", function () {
+    ui.createMenu("Notion Sync")
+      .addItem("Sync Full Name for selected rows", "syncNotionNameSelectedRows")
+      .addItem("Sync Full Name for all rows", "syncNotionNameAllRows")
+      .addSeparator()
+      .addItem("Sync ROLE for selected rows", "syncNotionRoleSelectedRows")
+      .addItem("Sync ROLE for all rows", "syncNotionRoleAllRows")
+      .addSeparator()
+      .addItem("Sync COMPANY for selected rows", "syncNotionCompanySelectedRows")
+      .addItem("Sync COMPANY for all rows", "syncNotionCompanyAllRows")
+      .addSeparator()
+      .addItem("Sync INDUSTRY for selected rows", "syncNotionIndustrySelectedRows")
+      .addItem("Sync INDUSTRY for all rows", "syncNotionIndustryAllRows")
+      .addToUi();
+  });
+
   addPersonalizedDocsMenuSafely_(ui);
 }
 
