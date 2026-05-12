@@ -282,8 +282,8 @@ function pdRunDocAndPdfBuild_(sheet, rows) {
       const evaluation = pdEvaluateRowReadiness_(context, row);
       const successMessage = pdBuildDocBuildMessage_(evaluation);
 
-      sheet.getRange(rowNumber, docUrlCol + 1).setValue(docResult.url).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
-      sheet.getRange(rowNumber, pdfUrlCol + 1).setValue(pdfResult.url).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
+      pdWriteCellValueAndBackground_(sheet, rowNumber, docUrlCol, docResult.url, PERSONALIZED_DOC_CFG.READY_HEX);
+      pdWriteCellValueAndBackground_(sheet, rowNumber, pdfUrlCol, pdfResult.url, PERSONALIZED_DOC_CFG.READY_HEX);
       pdWriteStatus_(sheet, rowNumber, statusCol, PERSONALIZED_DOC_CFG.STATUS.PDF_READY, successMessage);
 
       if (docResult.mode === 'created') {
@@ -386,8 +386,8 @@ function pdRunPlaceholderPdfSync_(sheet, rows, blockerMessages) {
       }
 
       pdfUrl = pdfResult.url;
-      sheet.getRange(rowNumber, docUrlCol + 1).setValue(docResult.url).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
-      sheet.getRange(rowNumber, pdfUrlCol + 1).setValue(pdfUrl).setBackground(PERSONALIZED_DOC_CFG.READY_HEX);
+      pdWriteCellValueAndBackground_(sheet, rowNumber, docUrlCol, docResult.url, PERSONALIZED_DOC_CFG.READY_HEX);
+      pdWriteCellValueAndBackground_(sheet, rowNumber, pdfUrlCol, pdfUrl, PERSONALIZED_DOC_CFG.READY_HEX);
       pdSyncValueToKit_(email, kitFieldKey, pdfUrl);
       pdWriteStatus_(
         sheet,
@@ -426,7 +426,7 @@ function pdBuildPlaceholderSyncMessage_(blockerMessage) {
 }
 
 function pdLoadRunContext_(sheet, includeTemplate) {
-  const values = sheet.getDataRange().getValues();
+  const values = pdWithSpreadsheetRetry_(() => sheet.getDataRange().getValues());
   const headers = values[0].map(pdNormalizeHeader_);
   const optionalPreflightHeaders = pdGetOptionalPreflightHeadersForSheet_(sheet);
   const context = { sheet, values, headers, optionalPreflightHeaders };
@@ -745,16 +745,52 @@ function pdEnsureOutputColumn_(sheet, headers, headerName) {
   }
 
   const column = headers.length + 1;
-  sheet.getRange(1, column).setValue(headerName);
+  pdWithSpreadsheetRetry_(() => sheet.getRange(1, column).setValue(headerName));
   headers.push(headerName);
   return column - 1;
 }
 
 function pdWriteStatus_(sheet, rowNumber, statusCol, status, message) {
-  const cell = sheet.getRange(rowNumber, statusCol + 1);
-  cell.setValue(status);
-  cell.setNote(message || '');
-  cell.setBackground(pdGetStatusColor_(status));
+  pdWithSpreadsheetRetry_(() => {
+    const cell = sheet.getRange(rowNumber, statusCol + 1);
+    cell.setValue(status);
+    cell.setNote(message || '');
+    cell.setBackground(pdGetStatusColor_(status));
+  });
+}
+
+function pdWriteCellValueAndBackground_(sheet, rowNumber, zeroBasedCol, value, background) {
+  pdWithSpreadsheetRetry_(() => {
+    sheet.getRange(rowNumber, zeroBasedCol + 1).setValue(value).setBackground(background);
+  });
+}
+
+function pdWithSpreadsheetRetry_(operation) {
+  const maxAttempts = 3;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return operation();
+    } catch (error) {
+      lastError = error;
+
+      if (!pdIsTransientSpreadsheetError_(error) || attempt === maxAttempts) {
+        throw error;
+      }
+
+      if (typeof Utilities !== 'undefined' && Utilities && typeof Utilities.sleep === 'function') {
+        Utilities.sleep(500 * attempt);
+      }
+    }
+  }
+
+  throw lastError;
+}
+
+function pdIsTransientSpreadsheetError_(error) {
+  const message = String(error?.message || error || '');
+  return /Service Spreadsheets timed out|Spreadsheet service timed out|Service invoked too many times/i.test(message);
 }
 
 function pdGetStatusColor_(status) {

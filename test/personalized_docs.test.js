@@ -197,6 +197,53 @@ function createS3Context({ notionRows = {}, existingSheets = ['Inbox', 'AILA 5']
 }
 
 describe('personalized docs full delivery', () => {
+  test('retries transient spreadsheet timeouts while writing row status', () => {
+    const calls = [];
+    const context = loadPersonalizedDocs({
+      __calls: calls,
+      Utilities: {
+        sleep(ms) {
+          calls.push(['sleep', ms]);
+        },
+      },
+    });
+    const cell = {
+      setValue(value) {
+        calls.push(['setValue', value]);
+        if (calls.filter(call => call[0] === 'setValue').length === 1) {
+          throw new Error('Service Spreadsheets timed out while accessing document with ID sheet-id.');
+        }
+        return cell;
+      },
+      setNote(value) {
+        calls.push(['setNote', value]);
+        return cell;
+      },
+      setBackground(value) {
+        calls.push(['setBackground', value]);
+        return cell;
+      },
+    };
+    const sheet = {
+      getRange(row, col) {
+        calls.push(['getRange', row, col]);
+        return cell;
+      },
+    };
+
+    context.pdWriteStatus_(sheet, 3, 4, 'KIT_SYNCED', 'PDF link synced to Kit.');
+
+    expect(calls).toEqual([
+      ['getRange', 3, 5],
+      ['setValue', 'KIT_SYNCED'],
+      ['sleep', 500],
+      ['getRange', 3, 5],
+      ['setValue', 'KIT_SYNCED'],
+      ['setNote', 'PDF link synced to Kit.'],
+      ['setBackground', '#d9ead3'],
+    ]);
+  });
+
   test('syncs placeholder PDF URLs for blocked rows while building ready rows', () => {
     const context = loadPersonalizedDocs({ __calls: [] });
     vm.runInContext(`
